@@ -1,7 +1,7 @@
 clc; close all; clear variables;
 
 % load reference solution 
-soln = load("vdfp_refsoln_IMEX222_QCM_Nx160_Nvperp200_Nvpar200_T1_tole-8_dt10-3.mat"); % Nx=160, Nv=Nz=200, Tf=1, tol=1e-8
+soln = load("./VFP-Reference-Solution/vdfp_refsoln_IMEX222_QCM_Nx160_Nvperp200_Nvpar200_T1_tole-8_dt10-3.mat"); % Nx=160, Nv=Nz=200, Tf=1, tol=1e-8
 soln = soln.f_vals_low_rank;
 
 % DTvals = 0.2:0.02:0.9; % for error plot
@@ -404,7 +404,7 @@ for dt_index = 1:numel(DTvals)
         end
         
         % % save ref soln if running it
-        % save('vdfp_refsoln_IMEX222_QCM_Nx160_Nvperp200_Nvpar200_T1_tole-8_dt10-3.mat','f_vals_low_rank');
+        % save('./VFP-Reference-Solution/vdfp_refsoln_IMEX222_QCM_Nx160_Nvperp200_Nvpar200_T1_tole-8_dt10-3.mat','f_vals_low_rank');
         % return
 
         %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

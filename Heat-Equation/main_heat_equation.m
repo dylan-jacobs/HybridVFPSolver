@@ -103,7 +103,13 @@ for k = 1:numel(lambdavals)
     end
 end
 
-%%
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%% ---- FIGURES ---- %%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 % 1. Final solution
 figure(1); clf; surf(Rmat, Zmat, f);
 colorbar; shading interp;
@@ -157,8 +163,8 @@ xlabel('t'); ylabel('Mass'); % title('Relative mass of numerical solution');
 legend('Backward Euler', 'DIRK2', 'DIRK3');
 fontsize(18,"points");
 set(gcf,'Units','pixels','Position',[100 100 800 500])
-saveas(gcf, './Plots/heat_eqn_mass.fig');
-exportgraphics(gcf,'./Plots/heat_eqn_mass.pdf','ContentType','vector');
+% saveas(gcf, './Plots/heat_eqn_mass.fig');
+% exportgraphics(gcf,'./Plots/heat_eqn_mass.pdf','ContentType','vector');
 
 % 5. Rank plot
 figure(5); clf;
@@ -167,8 +173,8 @@ xlabel('t'); ylabel('Rank');
 legend('Backward Euler', 'DIRK2', 'DIRK3');
 fontsize(18,"points");
 set(gcf,'Units','pixels','Position',[100 100 800 500])
-saveas(gcf, './Plots/heat_eqn_rank_plot.fig');
-exportgraphics(gcf,'./Plots/heat_eqn_rank_plot.pdf','ContentType','vector');
+% saveas(gcf, './Plots/heat_eqn_rank_plot.fig');
+% exportgraphics(gcf,'./Plots/heat_eqn_rank_plot.pdf','ContentType','vector');
 
 
 

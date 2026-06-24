@@ -1,8 +1,10 @@
 clc; clear variables; close all;
+
 lambdavals = (0.2:0.1:6)'; % for accuracy plots
 % lambdavals = 1; % for non accuracy plots
 % lambdavals = [0.01]; % for reference soln
-soln = load('./DFP Reference Solutions/dfp_refsoln_dirk3.mat');
+
+soln = load('./DFP-Reference-Solution/dfp_refsoln_dirk3.mat');
 f_exact = soln.f;
 errors = zeros(numel(lambdavals), 3);
 methods = ['1', '2', '3']; % time-stepping method: 1=B.Euler, 2=DIRK2, 3=DIRK3
@@ -134,7 +136,15 @@ end
 
 % save reference soln
 % save('dfp_refsoln_dirk3.mat', 'f', 'mass', 'Jzvals', 'E');
-%%
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%% ---- FIGURES ---- %%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 c_blue   = [0.1216 0.4667 0.7059];
 c_orange = [1.0000 0.4980 0.0549];
 c_green  = [0.1725 0.6275 0.1725];
