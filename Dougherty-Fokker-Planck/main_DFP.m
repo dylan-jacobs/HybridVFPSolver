@@ -1,0 +1,528 @@
+clc; clear variables; close all;
+lambdavals = (0.2:0.1:6)'; % for accuracy plots
+% lambdavals = 1; % for non accuracy plots
+% lambdavals = [0.01]; % for reference soln
+soln = load('./DFP Reference Solutions/dfp_refsoln_dirk3.mat');
+f_exact = soln.f;
+errors = zeros(numel(lambdavals), 3);
+methods = ['1', '2', '3']; % time-stepping method: 1=B.Euler, 2=DIRK2, 3=DIRK3
+tolerance = 1e-6;
+
+% mesh parameters
+vmin = 0; vmax = 14;
+zmin = -16; zmax = 16;
+Nr = 100; Nz = 100;
+tf = 1; % for temporal accuracy plot
+% tf = 25; % for non accuracy plots
+
+[Rmat, Zmat, dr, dz] = GetRZ(vmin, vmax, zmin, zmax, Nr, Nz);
+rvals = Rmat(:, 1);
+zvals = Zmat(1, :)';
+
+% initial rank
+r0 = 10;
+
+% initial conditions
+f_M = @(vr,vz,n,ur,uz,T,R) (n/(2*pi*R*T)^(3/2)).*exp(-(vr.^2+(vz-uz).^2)./(2*R*T)); %assumes ur=0!!!
+
+
+n1 = 2;
+u1r = 0;
+u1z = -0.5;
+T1 = 2;
+n2 = 1;
+u2r = 0;
+u2z = 0.9;
+T2 = 1;
+R = 1;
+
+for k = 1:numel(lambdavals)
+    dt = lambdavals(k)/((1/dr) + (1/dz));
+    disp(['dt=', num2str(dt), ', Progress: ', num2str(k), '/', num2str(numel(lambdavals))]);
+    tvals = (0:dt:tf)';
+    if tvals(end) ~= tf
+        tvals = [tvals; tf];
+    end
+    Nt = numel(tvals);
+    
+    % store rank, mass, momentum, energy, l1 decay, etc...
+    l1 = zeros(Nt, 3);
+    mass = zeros(Nt, 1);
+    Jzvals = zeros(Nt, 1);
+    E = zeros(Nt, 1);
+    relative_entropy = zeros(Nt, 3);
+    ranks = zeros(Nt, 3);
+    
+    for x = 1:3
+        method = methods(x);
+        
+        f0 = @(vr,vz) f_M(vr,vz,n1,u1r,u1z,T1,R) + f_M(vr,vz,n2,u2r,u2z,T2,R); % IC
+        f = f0(Rmat, Zmat);
+        
+        % discrete moments of f0
+        rho0 = sum(sum(f.*Rmat))*2*pi*dr*dz;
+        Jz0  = sum(sum(f.*Rmat.*Zmat))*2*pi*dr*dz;
+        kappa0   = sum(sum(f.*Rmat.*((Rmat.^2 + Zmat.^2)/2)))*2*pi*dr*dz;
+        
+        [f_inf, n_inf, uz_inf, T_inf] = QCM(rho0, Jz0, kappa0, R, rvals, zvals);
+        
+        % moments at equilibrium
+        rhoM = rho0;
+        JzM = Jz0;
+        kappaM = kappa0;
+        
+        ur_inf = 0; % no drift in r
+        ur = ur_inf;
+        uz = uz_inf;
+        D_inf = R*T_inf;
+        
+        Ar = @(u, w, t) w; %cell centers
+        Br = @(u, w, t) w.*(w - u); %evaluated on cell boundaries
+        Cr = @(u, w, t) D_inf*w; %evaluated cell boundaries
+        Az = @(u, w, t) w.^0;
+        Bz = @(u, w, t) w - u;
+        Cz = @(u, w, t) D_inf*w.^0;
+
+        % Compute LoMaC parameters once
+        wr = exp(-(rvals.^2));
+        wz = exp(-(zvals.^2));
+        c = (dr*sum(rvals.^2.*wr.*rvals))/(dr*sum(wr.*rvals)) + (dz*sum(zvals.^2.*wz))/(dz*sum(wz));
+        w_norm_1_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(wz);
+        w_norm_v_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(zvals.^2 .* wz);
+        w_norm_v2_squared = 2*pi*dr*dz*sum(sum((Rmat.^2 + Zmat.^2 - c).^2 .* exp(-Rmat.^2 - Zmat.^2) .* Rmat));
+        
+        % init bases
+        [Vr, S, Vz] = svd2(f, rvals);
+        r0 = min(r0, size(Vr, 2)); % initial rank r0
+        Vr = Vr(:, 1:r0); S = S(1:r0, 1:r0); Vz = Vz(:, 1:r0);
+        
+        l1(1, x) = 2*pi*dr*dz*sum(sum(abs(Rmat .* (f - f_inf))));
+        mass(1) = rho0;
+        Jzvals(1) = Jz0;
+        E(1) = kappa0;
+        relative_entropy(1, x) = 2*pi*dr*dz*sum(sum(Rmat .* f.*(log(f./f_inf))));
+        ranks(1, x) = r0;
+        
+        % time-stepping loop
+        for n = 2:Nt
+            tval = tvals(n);
+            dt = tval - tvals(n-1);
+            disp(['Method: ', method, ', t=', num2str(tval)]);
+            switch(method)
+                case '1'
+                    [Vr, S, Vz, rank] = BackwardEulerTimestep(Vr, S, Vz, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+                case '2'
+                    [Vr, S, Vz, rank] = DIRK2Timestep(Vr, S, Vz, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+                case '3'
+                    [Vr, S, Vz, rank] = DIRK3Timestep(Vr, S, Vz, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+            end
+        
+            f = Vr*S*Vz';
+            
+            l1(n, x) = 2*pi*dr*dz*sum(sum(abs(Rmat .* (f - f_inf))));
+            mass(n) = 2*pi*dr*dz*sum(sum(Rmat .* f));    
+            Jzvals(n) = 2*pi*dr*dz*sum(sum(f .* Rmat .* Zmat));
+            E(n) = pi*dr*dz*sum(sum(f .* (Rmat.^2 + Zmat.^2) .* Rmat));
+            relative_entropy(n, x) = 2*pi*dr*dz*sum(sum(Rmat .* f.*(log((f+1e-16)./(f_inf+1e-16)))));
+            ranks(n, x) = rank;
+        end
+        
+        errors(k, x) = 2*pi*dr*dz*sum((sum(Rmat .* abs(f - f_exact)))); % L1 error
+    
+    end
+end
+
+% save reference soln
+% save('dfp_refsoln_dirk3.mat', 'f', 'mass', 'Jzvals', 'E');
+%%
+c_blue   = [0.1216 0.4667 0.7059];
+c_orange = [1.0000 0.4980 0.0549];
+c_green  = [0.1725 0.6275 0.1725];
+c_red    = [0.8392 0.1529 0.1569];
+c_purple = [0.5804 0.4039 0.7412];
+c_brown  = [0.5490 0.3373 0.2941];
+c_pink   = [0.8902 0.4667 0.7608];
+c_gray   = [0.4980 0.4980 0.4980];
+
+% Temporal accuracy
+cutoff = 0.2;
+dtvals = lambdavals./((1/dr) + (1/dz));
+figure(1); clf;
+loglog(dtvals, errors(:, 1), '-', 'Color', c_blue, 'LineWidth', 1.5); hold on;
+loglog(dtvals, errors(:, 2), '-', 'Color', c_orange, 'LineWidth', 1.5); hold on;
+loglog(dtvals, errors(:, 3), '-', 'Color', c_green,  'LineWidth', 1.5); hold on;
+loglog(dtvals(ceil(cutoff*end):end), 0.08*(dtvals(ceil(cutoff*end):end) .^ 1), '--', 'Color', c_blue, 'LineWidth', 1.5);
+loglog(dtvals(ceil(cutoff*end):end), 2e-2*(dtvals(ceil(cutoff*end):end) .^ 2), '--', 'Color', c_orange, 'LineWidth', 1.5);
+loglog(dtvals(ceil(cutoff*end):end), 2.2e-2*(dtvals(ceil(cutoff*end):end) .^ 3), '--', 'Color', c_green, 'LineWidth', 1.5);
+xlabel('\Deltat'); ylabel('L^1 error'); % title('Error plot');
+xlim([dtvals(1), dtvals(end)])
+ylim([8e-8, 1e-1]);
+legend('Backward Euler', 'DIRK2', 'DIRK3', 'Order 1', 'Order 2', 'Order 3', 'Location', 'southeast');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_temporal_error_plot.fig');
+% exportgraphics(gcf,'./Plots/DFP_temporal_error_plot.pdf','ContentType','vector')
+
+%% Numerical solution
+figure(2); clf; surf(Rmat, Zmat, f);
+colorbar; shading interp;
+xlabel('V_{\perp}'); ylabel('V_{||}'); zlabel('f'); % title([sprintf('DIRK3 numerical solution at time %s', num2str(tf, 4))]);
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_numerical_solution.fig');
+% exportgraphics(gcf,'./Plots/DFP_numerical_solution.pdf','ContentType','vector')
+
+% Exact solution
+figure(3); clf; surf(Rmat, Zmat, f_exact);
+colorbar; shading interp;
+xlabel('V_{\perp}'); ylabel('V_{||}'); zlabel('f_{exact}'); % title([sprintf('f_{exact} at time t=%s', num2str(tf, 4))]);
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_exact_solution.fig');
+% exportgraphics(gcf,'./Plots/DFP_exact_solution.pdf','ContentType','vector')
+
+% L1 decay
+figure(4); clf; 
+semilogy(tvals, l1(:, 1), 'LineWidth', 1.5);hold on;
+semilogy(tvals, l1(:, 2), 'LineWidth', 1.5);
+semilogy(tvals, l1(:, 3), 'LineWidth', 1.5);
+xlabel('time'); ylabel('|| f - f_{inf} ||_1'); % title('L^1 drive to equilibrium solution');
+legend('Backward Euler', 'DIRK2', 'DIRK3', 'Location', 'northeast');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_l1_decay.fig');
+% exportgraphics(gcf,'./Plots/DFP_L1_decay.pdf','ContentType','vector')
+
+% Relative entropy
+figure(5); clf;
+semilogy(tvals, relative_entropy(:, 1), 'LineWidth', 1.5); hold on;
+semilogy(tvals, relative_entropy(:, 2), 'LineWidth', 1.5);
+semilogy(tvals, relative_entropy(:, 3), 'LineWidth', 1.5);
+xlabel('time'); ylabel('Relative entropy decay'); % title('Relative entropy decay');
+legend('Backward Euler', 'DIRK2', 'DIRK3', 'Location', 'northeast');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_relative_entropy.fig');
+% exportgraphics(gcf,'./Plots/DFP_relative_entropy.pdf','ContentType','vector')
+
+% Structure conservation
+figure(6); clf;
+plot(tvals(2:end), abs(mass(2:end)-mass(1))/mass(1), 'LineWidth', 1.5); hold on;
+plot(tvals(2:end), abs(Jzvals(2:end)-Jzvals(1)), 'LineWidth', 1.5);
+plot(tvals(2:end), abs(E(2:end)-E(1))/E(1), 'LineWidth', 1.5);
+xlabel('time'); ylabel('Variation'); % title('Mass, momentum, and energy conservation');
+legend('Relative mass deviation', 'Absolute momentum deviation', 'Relative energy deviation', 'Location', 'northeast');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_structure_conservation.fig');
+% exportgraphics(gcf,'./Plots/DFP_structure_conservation.pdf','ContentType','vector')
+
+% Rank plot
+figure(7); clf; hold on;
+plot(tvals, ranks(:, 1), 'LineWidth', 1.5); hold on;
+plot(tvals, ranks(:, 2), 'LineWidth', 1.5);
+plot(tvals, ranks(:, 3), 'LineWidth', 1.5);
+xlabel('time'); ylabel('Rank'); % title('Rank plot');
+ylim([0, 10]);
+legend('Backward Euler', 'DIRK2', 'DIRK3', 'Location', 'northeast');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/DFP_rank_plot.fig');
+% exportgraphics(gcf,'./Plots/DFP_rank_plot.pdf','ContentType','vector')
+
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%% ---- HELPER FUNCTIONS ---- %%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [Flux] = GetFlux(A, B, C, u, xvals, t, dx)
+    N = numel(xvals);
+    A = A(u, xvals, t);
+    B = B(u, xvals(1:N-1) + dx/2, t);
+    C = C(u, xvals(1:N-1) + dx/2, t);
+    
+    w = dx*B./C + 1e-14;
+    delta = (1 ./ w) - (1 ./ (exp(w) - 1));
+
+    F1 = -((1/dx)*C - delta.*B);
+    F2 = (1 - delta).*B + (1/dx)*C;
+
+    F_pos = spdiags([F1;0], 0, N, N) + spdiags([0;F2], 1, N, N);
+    F_neg = spdiags([0; F2], 0, N, N) + spdiags(F1, -1, N, N);
+
+    Flux = diag(1./A)*(1/dx)*(F_pos - F_neg);
+end
+
+function [Vr, S, Vz, rank] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    Nr = numel(rvals);
+    Nz = numel(zvals);
+
+    Fr1 = GetFlux(Ar, Br, Cr, ur, rvals, tval, dr);
+    Fz1 = GetFlux(Az, Bz, Cz, uz, zvals, tval, dz);
+
+    Vr0_star = Vr0;
+    Vz0_star = Vz0;
+
+    K0 = Vr0*S0;
+    L0 = Vz0*S0';
+
+    K1 = sylvester(eye(Nr) - (dt*Fr1), -dt*(Fz1*Vz0_star)'*Vz0_star, K0);
+    L1 = sylvester(eye(Nz) - (dt*Fz1), -dt*(Fr1*Vr0_star)'*(rvals.*Vr0_star), L0);
+
+    [Vr1_ddagger, ~] = qr2(K1, rvals);
+    [Vz1_ddagger, ~] = qr(L1, 0);
+
+    [Vr1_hat, Vz1_hat] = reduced_augmentation([Vr1_ddagger, Vr0], [Vz1_ddagger, Vz0], rvals);
+
+    S1_hat = sylvester((speye(size(Vr1_hat, 2)) - (dt*((rvals .* Vr1_hat)')*(Fr1*Vr1_hat))), -dt*(Fz1*Vz1_hat)'*Vz1_hat, ((rvals .* Vr1_hat)'*Vr0)*S0*((Vz0')*Vz1_hat));
+    [Vr, S, Vz, rank] = LoMaC(Vr1_hat, S1_hat, Vz1_hat, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+end
+
+function [Vr, S, Vz, rank] = DIRK2Timestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    Nr = numel(rvals);
+    Nz = numel(zvals);
+
+    Fr1 = GetFlux(Ar, Br, Cr, ur, rvals, tval, dr);
+    Fz1 = GetFlux(Az, Bz, Cz, uz, zvals, tval, dz);
+
+    nu = 1-(sqrt(2)/2);
+
+    % Stage 1: Backward Euler
+    [Vr1, S1, Vz1, ~] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, nu*dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+
+    W0_Vr = [Vr0, Fr1*Vr1, Vr1];
+    W0_S  = blkdiag(S0, (1-nu)*dt*S1, (1-nu)*dt*S1);
+    W0_Vz = [Vz0, Vz1, Fz1*Vz1];
+
+    % Reduced Augmentation
+    % Predict V_dagger using B. Euler for second stage
+    [Vr1_dagger, ~, Vz1_dagger, ~] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+    [Vr_star, Vz_star] = reduced_augmentation([Vr1_dagger, Vr1, Vr0], [Vz1_dagger, Vz1, Vz0], rvals);
+
+    % Stage 2: KLS Steps
+    Fr2 = GetFlux(Ar, Br, Cr, ur, rvals, tval+dt, dr);
+    Fz2 = GetFlux(Az, Bz, Cz, uz, zvals, tval+dt, dz);
+   
+    % K/L-Step
+    W0_K1 = W0_Vr*W0_S*(W0_Vz' * Vz_star);
+    W0_L1 = (((rvals .* Vr_star)' * W0_Vr)*W0_S*(W0_Vz'))';
+
+    K1 = sylvester(eye(Nr) - (nu*dt*Fr2), -nu*dt*(Fz2*Vz_star)'*Vz_star, W0_K1);
+    L1 = sylvester(eye(Nz) - (nu*dt*Fz2), -nu*dt*(Fr2*Vr_star)'*(rvals .* Vr_star), W0_L1);
+
+    % Get bases
+    [Vr_ddagger, ~] = qr2(K1, rvals); [Vz_ddagger, ~] = qr(L1, 0);
+
+    % Reduced Augmentation
+    [Vr1_hat, Vz1_hat] = reduced_augmentation([Vr_ddagger, Vr1, Vr0], [Vz_ddagger, Vz1, Vz0], rvals);
+
+    % S-Step
+    W0_S1 = ((rvals .* Vr1_hat)' * W0_Vr)*W0_S*(W0_Vz'*Vz1_hat);
+
+    S1_hat = sylvester(eye(size(Vr1_hat, 2)) - (nu*dt*((rvals .* Vr1_hat)')*Fr2*Vr1_hat), -nu*dt*(Fz2*Vz1_hat)'*Vz1_hat, W0_S1);
+    [Vr, S, Vz, rank] = LoMaC(Vr1_hat, S1_hat, Vz1_hat, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+end
+
+function [Vr3, S3, Vz3, rank] = DIRK3Timestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    
+    Fr1 = GetFlux(Ar, Br, Cr, ur, rvals, tval, dr);
+    Fz1 = GetFlux(Az, Bz, Cz, uz, zvals, tval, dz);
+    
+    % RK butcher table values
+    nu = 0.435866521508459;
+    beta1 = -(3/2)*(nu^2) + (4*nu) - (1/4);
+    beta2 = (3/2)*(nu^2) - (5*nu) + (5/4);
+    
+    % Stage 1: Backward Euler
+    [Vr1, S1, Vz1, ~] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, nu*dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+    [Vr_dagger1, ~, Vz_dagger1, ~] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, ((1+nu)/2)*dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+
+    W1_Vr = [Vr0, Fr1*Vr1, Vr1];
+    W1_S  = blkdiag(S0, (dt*(1-nu)/2)*S1, (dt*(1-nu)/2)*S1);
+    W1_Vz = [Vz0, Vz1, Fz1*Vz1];
+
+    % Reduced Augmentation
+    [Vr_star1, Vz_star1] = reduced_augmentation([Vr_dagger1, Vr1, Vr0], [Vz_dagger1, Vz1, Vz0], rvals);
+
+    % Stage 2:
+    Fr2 = GetFlux(Ar, Br, Cr, ur, rvals, tval + ((1+nu)/2)*dt, dr);
+    Fz2 = GetFlux(Az, Bz, Cz, uz, zvals, tval + ((1+nu)/2)*dt, dz);
+    
+    % K/L-Step
+    W1_K2 = W1_Vr*W1_S*(W1_Vz' * Vz_star1);
+    W1_L2 = (((rvals .* Vr_star1)' * W1_Vr)*W1_S*(W1_Vz'))';
+
+    K2 = sylvester(eye(size(Fr2)) - (nu*dt*Fr2), -nu*dt*(Fz2*Vz_star1)'*Vz_star1, W1_K2);
+    L2 = sylvester(eye(size(Fz2)) - (nu*dt*Fz2), -nu*dt*(Fr2*(rvals .* Vr_star1))'*Vr_star1, W1_L2);
+
+    % Get bases
+    [Vr_ddagger2, ~] = qr2(K2, rvals); [Vz_ddagger2, ~] = qr(L2, 0);
+
+    % Reduced Augmentation
+    [Vr2_hat, Vz2_hat] = reduced_augmentation([Vr_ddagger2, Vr1, Vr0], [Vz_ddagger2, Vz1, Vz0], rvals);
+
+    % S-Step
+    W1_S2 = ((rvals .* Vr2_hat)' * W1_Vr)*W1_S*(W1_Vz'*Vz2_hat);
+
+    S2_hat = sylvester(eye(size(Vr2_hat, 2)) - (nu*dt*(rvals .* Vr2_hat)'*Fr2*Vr2_hat), -nu*dt*(Fz2*Vz2_hat)'*Vz2_hat, W1_S2);
+    [Vr2, S2, Vz2, ~] = truncate_svd(Vr2_hat, S2_hat, Vz2_hat, tolerance);
+
+    % Stage 3:
+    Fr3 = GetFlux(Ar, Br, Cr, ur, rvals, tval + dt, dr);
+    Fz3 = GetFlux(Az, Bz, Cz, uz, zvals, tval + dt, dz);
+
+    % Predict V_dagger using B. Euler
+    [Vr_dagger3, ~, Vz_dagger3, ~] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+
+    W2_Vr = [Vr0, Fr1*Vr1, Vr1, Fr2*Vr2, Vr2];
+    W2_S  = blkdiag(S0, beta1*dt*S1, beta1*dt*S1, beta2*dt*S2, beta2*dt*S2);
+    W2_Vz = [Vz0, Vz1, Fz1*Vz1, Vz2, Fz2*Vz2];
+      
+    % Reduced augmentation
+    [Vr_star3, Vz_star3] = reduced_augmentation([Vr_dagger3, Vr2, Vr1, Vr0], [Vz_dagger3, Vz2, Vz1, Vz0], rvals);
+
+    % K/L-Step
+    W2_K3 = W2_Vr*W2_S*(W2_Vz' * Vz_star3);
+    W2_L3 = (((rvals .* Vr_star3)' * W2_Vr)*W2_S*(W2_Vz'))';
+   
+    K3 = sylvester(eye(size(Fr3)) - (nu*dt*Fr3), -nu*dt*(Fz3*Vz_star3)'*Vz_star3, W2_K3);
+    L3 = sylvester(eye(size(Fz3)) - (nu*dt*Fz3), -nu*dt*(Fr3*Vr_star3)'*(rvals .* Vr_star3), W2_L3);
+
+    % Get bases
+    [Vr_ddagger3, ~] = qr2(K3, rvals); [Vz_ddagger3, ~] = qr(L3, 0);
+
+    % Reduced Augmentation
+    [Vr3_hat, Vz3_hat] = reduced_augmentation([Vr_ddagger3, Vr2, Vr1, Vr0], [Vz_ddagger3, Vz2, Vz1, Vz0], rvals);
+
+    % S-Step
+    W2_S3 = ((rvals .* Vr3_hat)' * W2_Vr)*W2_S*(W2_Vz'*Vz3_hat);
+
+    S3_hat = sylvester(eye(size(Vr3_hat, 2)) - (nu*dt*((rvals .* Vr3_hat)')*Fr3*Vr3_hat), -nu*dt*(Fz3*Vz3_hat)'*Vz3_hat, W2_S3);
+    [Vr3, S3, Vz3, rank] = LoMaC(Vr3_hat, S3_hat, Vz3_hat, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+end
+
+function [Vr, S, Vz, rank] = truncate_svd(Vr, S, Vz, tolerance)
+    [U, Sigma, V] = svd(S, 0);
+    rank = find(diag(Sigma) > tolerance, 1, 'last');
+    if (sum(rank) == 0)
+        rank = 1;
+    end
+    Vr = Vr*U(:, 1:rank);
+    S = Sigma(1:rank, 1:rank);
+    Vz = Vz*V(:, 1:rank);
+end
+
+function [Vr, Vz] = reduced_augmentation(Vr_aug, Vz_aug, rvals)
+    tolerance = 1e-12;
+    [Qr, Rr] = qr2(Vr_aug, rvals);
+    [Qz, Rz] = qr(Vz_aug, 0);
+    [Ur, Sr, ~] = svd(Rr, 0);
+    [Uz, Sz, ~] = svd(Rz, 0);
+    rr = find(diag(Sr) > tolerance, 1, 'last');
+    rz = find(diag(Sz) > tolerance, 1, 'last');
+    rank = max(rr, rz);
+    rank = min(rank, min(size(Ur, 2), size(Uz, 2)));
+    Vr = Qr*Ur(:, 1:rank);
+    Vz = Qz*Uz(:, 1:rank);
+end
+
+function [Q, R] = qr2(X, rvals)
+    [Q, R] = qr(sqrt(rvals) .* X, 0);
+    Q = Q ./ sqrt(rvals);
+end
+
+function [U, S, V] = svd2(X, rvals)
+    [U, S, V] = svd(sqrt(rvals) .* X, 0);
+    U = U./sqrt(rvals);
+end
+
+function [rmat, zmat, dr, dz] = GetRZ(vmin, vmax, zmin, zmax, Nv, Nz)
+    rvals = linspace(vmin, vmax, Nv+1)';
+    zvals = linspace(zmin, zmax, Nz+1)';
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    rmid = rvals(1:end-1) + (dr/2);
+    zmid = zvals(1:end-1) + (dz/2);
+    [rmat, zmat] = meshgrid(rmid, zmid);
+    rmat = rmat';
+    zmat = zmat';
+end
+
+
+% ------- LoMaC Truncation ------- %
+function [Vr, S, Vz, rank] = LoMaC(Vr, S, Vz, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+    % LoMaC truncates given maxwellian (assumed low-rank) to given tolerance while conserving
+    % macroscopic quantities.
+    
+    Nr = numel(rvals); Nz = numel(zvals);
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    
+    p = 2*pi*dr*dz*sum(Vr .* rvals)*S*(sum(Vz)');
+    J = 2*pi*dr*dz*(sum(Vr .* rvals)*S*sum(Vz.*zvals)');
+    k = pi*dr*dz*(sum(Vr.*(rvals.^2).*rvals)*S*(sum(Vz)') + sum(Vr.*rvals)*S*(sum(Vz.*(zvals.^2)))');
+    
+    % Step 2: Scale by maxwellian to ensure inner product is well defined
+    % (f -> 0 as v -> infinity)
+    f1_proj_S_mtx11 = (p / w_norm_1_squared) - ((2*k - c*p)*c / w_norm_v2_squared);
+    f1_proj_S_mtx12 = (J / w_norm_v_squared);
+    f1_proj_S_mtx13 = ((2*k - c*p) / w_norm_v2_squared);
+    
+    proj_basis_r = wr.*[ones(Nr, 1), rvals.^2];
+    proj_basis_z = wz.*[ones(Nz, 1), zvals, zvals.^2];
+    f1_proj_S_mtx   = [f1_proj_S_mtx11, f1_proj_S_mtx12, f1_proj_S_mtx13;
+        f1_proj_S_mtx13,               0,               0];
+    
+    % f2 = f - f1 (via SVD)
+    f2_U = [Vr, proj_basis_r];
+    f2_S = blkdiag(S, -f1_proj_S_mtx);
+    f2_V = [Vz, proj_basis_z];
+    
+    % QR factorize to ensure orthonormal in cylindrical coordinates
+    [f2_Vr, f2_S, f2_Vz, ~] = truncate(f2_U, f2_S, f2_V, rvals, tolerance);
+    
+    % compute Pn(Te(f)) to ensure moments are kept
+    trun_f2_p = 2*pi*dr*dz*(sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz)'));
+    trun_f2_J = 2*pi*dr*dz*(sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz .* zvals)'));
+    trun_f2_k = pi*dr*dz*(sum(f2_Vr .* (rvals.^2) .* rvals)*f2_S*(sum(f2_Vz))' +  sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz .* (zvals.^2)))');
+    trun_f2_proj_S_mtx11 = (trun_f2_p / w_norm_1_squared) - (c*(2*trun_f2_k - c*trun_f2_p) / w_norm_v2_squared);
+    trun_f2_proj_S_mtx12 = (trun_f2_J / w_norm_v_squared);
+    trun_f2_proj_S_mtx13 = ((2*trun_f2_k - c*trun_f2_p) / w_norm_v2_squared);
+    
+    trun_f2_proj_S_mtx   = [trun_f2_proj_S_mtx11, trun_f2_proj_S_mtx12, trun_f2_proj_S_mtx13;
+        trun_f2_proj_S_mtx13,            0,            0];
+    
+    % compute fM
+    fM_proj_S_mtx11 = (rhoM / w_norm_1_squared) - ((2*kappaM - c.*rhoM)*c / w_norm_v2_squared);
+    fM_proj_S_mtx12 = (JzM / w_norm_v_squared);
+    fM_proj_S_mtx13 = ((2*kappaM - c*rhoM) / w_norm_v2_squared);
+    
+    fM_proj_S_mtx   = [fM_proj_S_mtx11, fM_proj_S_mtx12, fM_proj_S_mtx13;
+        fM_proj_S_mtx13,               0,              0];
+    
+    f_mass_S = fM_proj_S_mtx - trun_f2_proj_S_mtx;
+    
+    [Vr, S, Vz, rank] = truncate([proj_basis_r, f2_Vr], blkdiag(f_mass_S, f2_S), [proj_basis_z, f2_Vz], rvals, 1e-14);
+
+end
+
+function [Vr, S, Vz, rank] = truncate(Vr_aug, S_aug, Vz_aug, rvals, tolerance)
+    [Qr, Rr] = qr2(Vr_aug, rvals); [Qz, Rz] = qr(Vz_aug, 0);
+    [U, Sigma, V] = svd(Rr*S_aug*Rz', 0); 
+    rank = find(diag(Sigma) > tolerance, 1, 'last');
+    Vr = Qr*U(:, 1:rank);
+    S = Sigma(1:rank, 1:rank);
+    Vz = Qz*V(:, 1:rank);
+end

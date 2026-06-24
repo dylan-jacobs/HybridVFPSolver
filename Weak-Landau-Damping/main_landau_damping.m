@@ -1,0 +1,1073 @@
+clc; close all; clear variables;
+
+DTvals = 0.005;
+Nx = 300;
+ERRORS = zeros(6, numel(DTvals));
+
+for dtIndex = 1:numel(DTvals)
+    dt = DTvals(dtIndex);
+    
+    % initial rank
+    r0 = 10;
+    % time-stepping method: B.Euler
+    method = '2';
+    tolerance = 1e-8;
+    
+    ma = 1; % ion mass
+    me = 1/1836; % electron mass
+    qa = 1; % ion charge
+    qe = -1; % electron charge
+    R_const = 1; % gas constant
+    
+    % mesh parameters
+    Nr = 64;
+    Nz = 128;
+    x_min = 0;
+    x_max = 16;
+    Lv = 6;
+    interval = [x_min, x_max, 0, Lv, -Lv, Lv]; % 1D in x, 2D in v (x interval, r interval, z interval)
+    tf = 100;
+    
+    % Meshes
+    [xvals, Rmat, Zmat, dx, dr, dz] = GetRZ(Nx, Nr, Nz, interval);
+    
+    rvals = Rmat(:, 1);
+    zvals = Zmat(1, :)';
+    [Xmat, Zmat2] = meshgrid(xvals, zvals); Xmat=Xmat'; Zmat2=Zmat2'; % for plotting only
+    
+    % initialize f and compute moments from f
+    f_vals = zeros(Nr, Nz, Nx);
+    n_vals = zeros(Nx, 1);
+    u_perp = zeros(Nx, 1);
+    u_para = zeros(Nx, 1);
+    Ta_vals = zeros(Nx, 1);
+    Te_vals = zeros(Nx, 1);
+    leftBC = []; rightBC = []; 
+    n_left_BC = 0; n_right_BC = 0;
+    u_left_BC = 0; u_right_BC = 0;
+    Ta_left_BC = 0; Ta_right_BC = 0;
+    Te_left_BC = 0; Te_right_BC = 0;
+    for spatialIndex = 0:Nx+1
+        if spatialIndex == 0
+            x = xvals(end); % periodic BCs
+        elseif spatialIndex == Nx+1
+            x = xvals(1); % periodic BCs
+        else
+            x = xvals(spatialIndex);
+        end
+        
+        % weak Landau damping
+        alpha = 0.01; k = 1; % weak landau damping
+        n = 1 + alpha*sin(2*pi*k*x/(x_max - x_min));
+        u = 0;
+        Ta = 0.2; 
+        Te = 1;
+            
+        f = (n/((2*pi*R_const*Ta)^(3/2)))*exp(-((Zmat-u).^2 + Rmat.^2)/(2*R_const*Ta));
+    
+        if spatialIndex == Nx+1
+            leftBC = f;
+            n_left_BC = n;
+            u_left_BC = u;
+            Ta_left_BC = Ta;
+            Te_left_BC = Te;    
+        elseif spatialIndex == 0
+            rightBC = f;
+            n_right_BC = n;
+            u_right_BC = u;
+            Ta_right_BC = Ta;
+            Te_right_BC = Te;
+        else
+            f_vals(:, :, spatialIndex) = f;
+            n_vals(spatialIndex) = n;
+            u_para(spatialIndex) = u;
+            Ta_vals(spatialIndex) = Ta;
+            Te_vals(spatialIndex) = Te;
+        end
+    end
+    
+    
+    tvals = [0, 5e-3:dt:tf]';
+    if tvals(end) ~= tf
+        tvals = [tvals; tf];
+    end
+    Nt = numel(tvals);
+    
+    Ar = @(u, w, t) w; % cell centers
+    Br = @(u, w, t) w.*(w - u); % evaluated at cell boundaries
+    Cr = @(u, w, t, T, m) (T/m)*w; % evaluated cell boundaries
+    Az = @(u, w, t) w.^0;
+    Bz = @(u, w, t) w - u;
+    Cz = @(u, w, t, T, m) (T/m)*w.^0;
+    
+    % compute LoMaC parameters once
+    wr = exp(-(rvals.^2));
+    wz = exp(-(zvals.^2));
+    c = (dr*sum(rvals.^2.*wr.*rvals))/(dr*sum(wr.*rvals)) + (dz*sum(zvals.^2.*wz))/(dz*sum(wz));
+    w_norm_1_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(wz);
+    w_norm_v_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(zvals.^2 .* wz);
+    w_norm_v2_squared = 2*pi*dr*dz*sum(sum((Rmat.^2 + Zmat.^2 - c).^2 .* exp(-Rmat.^2 - Zmat.^2) .* Rmat));
+    
+    % store rank, mass, momentum, energy, l1 decay, etc...
+    mass = zeros(Nt, 1);
+    momentum = zeros(Nt, 1);
+    energy = zeros(Nt, 1);
+    avg_ranks = zeros(Nt, 1);
+    Efield_l2 = zeros(Nt, 1);
+    
+    % used to recompute mass, momentum, energy after each time-step
+    n_vals_diff = zeros(Nx, 1);
+    u_vals_diff = zeros(Nx, 1);
+    Ta_vals_diff = zeros(Nx, 1);
+    
+    % init bases
+    f_vals_low_rank = cell(Nx, 3); % store Vr, S, Vz at each spatial node
+    leftBC_low_rank = cell(1, 3);
+    rightBC_low_rank = cell(1, 3);
+    spatial_rank_vals = zeros(Nx, 1);
+    spatial_Efield = zeros(Nx, 1);
+    for spatialIndex = 1:Nx
+        f = f_vals(:, :, spatialIndex);
+        [Vr, S, Vz] = svd2(f, rvals);
+        r0 = min(r0, size(Vr, 2));
+        Vr = Vr(:, 1:r0); S = S(1:r0, 1:r0); Vz = Vz(:, 1:r0);
+        f_vals_low_rank{spatialIndex, 1} = Vr;
+        f_vals_low_rank{spatialIndex, 2} = S;
+        f_vals_low_rank{spatialIndex, 3} = Vz;  
+        spatial_rank_vals(spatialIndex, 1) = r0;
+        [~, E] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, n_vals, Te_vals, spatialIndex, n_left_BC, Te_left_BC, n_right_BC, Te_right_BC);
+        spatial_Efield(spatialIndex, 1) = E;
+    end
+
+    mass(1) = dx*ma*sum(n_vals);
+    momentum(1) = dx*ma*sum(n_vals .* u_para);
+    energy(1) = dx*ma*sum(0.5*((3/ma)*n_vals.*Ta_vals + n_vals.*u_para.^2) + (3/2)*n_vals.*Te_vals);
+    avg_ranks(1) = mean(spatial_rank_vals);
+    Efield_l2(1) = sqrt(dx*sum(real(spatial_Efield) .^ 2));
+    
+    flux_diff_n = 0;
+    flux_diff_nu = 0;
+    flux_diff_nU = 0;
+    
+    % time-stepping loop
+    for t_index = 2:Nt
+        tval = tvals(t_index);
+        disp(tval);
+        dt = tval - tvals(t_index-1);
+    
+        switch(method)
+            case '1'
+                leftBC_low_rank{1} = f_vals_low_rank{Nx, 1};
+                leftBC_low_rank{2} = f_vals_low_rank{Nx, 2};
+                leftBC_low_rank{3} = f_vals_low_rank{Nx, 3};
+
+                rightBC_low_rank{1} = f_vals_low_rank{1, 1};
+                rightBC_low_rank{2} = f_vals_low_rank{1, 2};
+                rightBC_low_rank{3} = f_vals_low_rank{1, 3};
+
+                n_left_BC = n_vals(end); n_right_BC = n_vals(1);
+                u_left_BC = u_para(end); u_right_BC = u_para(1);
+                Ta_left_BC = Ta_vals(end); Ta_right_BC = Ta_vals(1);
+                Te_left_BC = Te_vals(end); Te_right_BC = Te_vals(1);
+
+                [n_vals, u_para, Ta_vals, Te_vals, u_hat, nu_hat, S_hat, Q_hat, nTe_hat, kappaTx] = fluid_solver_IMEX111(f_vals_low_rank, n_vals, u_para, Ta_vals, Te_vals, dt, dx, dr, dz, rvals, zvals, qa, qe, ma, me, leftBC_low_rank, rightBC_low_rank, n_left_BC, u_left_BC, Te_left_BC, n_right_BC, u_right_BC, Te_right_BC);
+                
+                n_left_BC = n_vals(end); n_right_BC = n_vals(1);
+                u_left_BC = u_para(end); u_right_BC = u_para(1);
+                Ta_left_BC = Ta_vals(end); Ta_right_BC = Ta_vals(1);
+                Te_left_BC = Te_vals(end); Te_right_BC = Te_vals(1);
+    
+                nu = n_vals .* u_para;
+                nU = 0.5*((3/ma)*n_vals.*Ta_vals + n_vals.*u_para.^2);
+            
+                f_vals_Vr = cell(Nx, 1);
+                f_vals_S = cell(Nx, 1);
+                f_vals_Vz = cell(Nx, 1);
+            
+                spatial_Efield = zeros(Nx, 1);
+                parfor spatialIndex = 1:Nx
+                    Vr0 = f_vals_low_rank{spatialIndex, 1};
+                    S0 =  f_vals_low_rank{spatialIndex, 2};
+                    Vz0 = f_vals_low_rank{spatialIndex, 3};
+            
+                    rhoM = n_vals(spatialIndex);
+                    JzM  = nu(spatialIndex);
+                    kappaM = nU(spatialIndex);
+
+                    [Vr, S, Vz, rank, E] = IMEX111(Vr0, S0, Vz0, u_perp, u_para, dt, dx, tval, rvals, zvals, x_min, x_max, f_vals_low_rank, ma, me, qa, qe, Ar, Az, Br, Bz, Cr, Cz, tolerance, n_vals, Ta_vals, Te_vals, rhoM, JzM, kappaM, spatialIndex, leftBC_low_rank, rightBC_low_rank, n_left_BC, u_left_BC, Te_left_BC, n_right_BC, u_right_BC, Te_right_BC, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+                    spatial_Efield(spatialIndex, 1) = E;
+
+                    f_vals_Vr{spatialIndex} = Vr;
+                    f_vals_S{spatialIndex} = S;
+                    f_vals_Vz{spatialIndex} = Vz;
+    
+                    spatial_rank_vals(spatialIndex, 1) = rank;
+                    n_vals_diff(spatialIndex) = 2*pi*dr*dz*sum(Vr .* rvals)*S*(sum(Vz)');
+                    u_vals_diff(spatialIndex) = 2*pi*dr*dz*sum(Vr .* rvals)*S*(sum(Vz .* zvals)')./n_vals_diff(spatialIndex);
+                    Ta_vals_diff(spatialIndex) = (2*pi*dr*dz*(sum(Vr .* (rvals.^2) .* rvals)*S*(sum(Vz)') + (sum(Vr .* rvals)*S*(sum(Vz .* (zvals.^2))'))) - n_vals_diff(spatialIndex)*u_vals_diff(spatialIndex)^2)/(3*n_vals_diff(spatialIndex)/ma);
+                end
+    
+                % reassemble into cell array
+                f_vals_low_rank_temp = [f_vals_Vr, f_vals_S, f_vals_Vz];
+    
+                % update mass, momentum, energy (IMEX111)
+                flux_diff_n = flux_diff_n + dt*(nu_hat(end) - nu_hat(1));
+                flux_diff_nu = flux_diff_nu + dt*((S_hat(end) - S_hat(1)) - (qa/(2*qe*ma))*(n_right_BC*Te_right_BC + n_vals(end)*Te_vals(end) - n_vals(1)*Te_vals(1) - n_left_BC*Te_left_BC));
+                flux_diff_nU = flux_diff_nU + dt*((Q_hat(end) - Q_hat(1)) + 2.5*(u_hat(end)*nTe_hat(end) - u_hat(1)*nTe_hat(1)) - (kappaTx(end) - kappaTx(1)));
+
+            case '2'
+                % IMEX222
+    
+                % Butcher table values for IMEX222
+                gamma = 1-(sqrt(2)/2);
+                delta = 1-(1/(2*gamma));
+    
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%
+                %%%% ---- STAGE 1 ---- %%%%
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+                % Periodic BCs
+                leftBC_low_rank{1} = f_vals_low_rank{Nx, 1};
+                leftBC_low_rank{2} = f_vals_low_rank{Nx, 2};
+                leftBC_low_rank{3} = f_vals_low_rank{Nx, 3};
+
+                rightBC_low_rank{1} = f_vals_low_rank{1, 1};
+                rightBC_low_rank{2} = f_vals_low_rank{1, 2};
+                rightBC_low_rank{3} = f_vals_low_rank{1, 3};
+
+                n_left_BC = n_vals(end); n_right_BC = n_vals(1);
+                u_left_BC = u_para(end); u_right_BC = u_para(1);
+                Ta_left_BC = Ta_vals(end); Ta_right_BC = Ta_vals(1);
+                Te_left_BC = Te_vals(end); Te_right_BC = Te_vals(1);
+
+                [n_vals1, u_para1, Ta_vals1, Te_vals1, u_hat1, nu_hat1, S_hat1, Q_hat1, nTe_hat1, kappaTx1] = fluid_solver_IMEX111(f_vals_low_rank, n_vals, u_para, Ta_vals, Te_vals, dt, dx, dr, dz, rvals, zvals, qa, qe, ma, me, leftBC_low_rank, rightBC_low_rank, n_left_BC, u_left_BC, Te_left_BC, n_right_BC, u_right_BC, Te_right_BC);
+                
+                n_left_BC1 = n_vals1(end); n_right_BC1 = n_vals1(1);
+                u_left_BC1 = u_para1(end); u_right_BC1 = u_para1(1);
+                Ta_left_BC1 = Ta_vals1(end); Ta_right_BC1 = Ta_vals1(1);
+                Te_left_BC1 = Te_vals1(end); Te_right_BC1 = Te_vals1(1);
+
+                nu1 = n_vals1 .* u_para1;
+                nU1 = 0.5*((3/ma)*n_vals1.*Ta_vals1 + n_vals1.*u_para1.^2);
+            
+                f_vals_Vr = cell(Nx, 1);
+                f_vals_S = cell(Nx, 1);
+                f_vals_Vz = cell(Nx, 1);
+    
+                parfor spatialIndex = 1:Nx
+                    Vr0 = f_vals_low_rank{spatialIndex, 1};
+                    S0 = f_vals_low_rank{spatialIndex, 2};
+                    Vz0 = f_vals_low_rank{spatialIndex, 3};
+            
+                    rhoM1 = n_vals1(spatialIndex);
+                    JzM1  = nu1(spatialIndex);
+                    kappaM1 = nU1(spatialIndex);
+
+                    % Collision-less system --> Fokker-Planck collision operators set to 0
+                    nu_aa1 = 0;
+                    nu_ae1 = 0;
+                    C_aa_r1 = nu_aa1*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Ta_vals1(spatialIndex), ma, rvals, tval, dr);
+                    C_ae_r1 = nu_ae1*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Te_vals1(spatialIndex), ma, rvals, tval, dr);
+                    C_aa_z1 = nu_aa1*GetFokkerPlanckFlux(Az, Bz, Cz, u_para1(spatialIndex), Ta_vals1(spatialIndex), ma, zvals, tval, dz);
+                    C_ae_z1 = nu_ae1*GetFokkerPlanckFlux(Az, Bz, Cz, u_para1(spatialIndex), Te_vals1(spatialIndex), ma, zvals, tval, dz);
+                    Cr1 = C_aa_r1 + C_ae_r1;
+                    Cz1 = C_aa_z1 + C_ae_z1;
+                
+                    % discretize Lorentz force             
+                    [Dz1, ~] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, n_vals1, Te_vals1, spatialIndex, n_left_BC1, Te_left_BC1, n_right_BC1, Te_right_BC1);
+
+                    % discretize velocity explicitly
+                    [Dx1_Vr, Dx1_S, Dx1_Vz] = GetVlasovLowRank(gamma*dt, dx, zvals, f_vals_low_rank, leftBC_low_rank, rightBC_low_rank, spatialIndex);
+                                        
+                    Vr0_star = Vr0;
+                    Vz0_star = Vz0;
+
+                    W0_K1 = [Vr0, Dx1_Vr]*blkdiag(S0, -Dx1_S)*([Vz0, Dx1_Vz]'*Vz0_star);
+                    W0_L1 = (((rvals .* Vr0_star)' * [Vr0, Dx1_Vr])*blkdiag(S0, -Dx1_S)*([Vz0, Dx1_Vz]'))';
+                
+                    K1 = sylvester(eye(Nr) - (gamma*dt*Cr1), gamma*dt*((Dz1 - Cz1)*Vz0_star)'*Vz0_star, W0_K1);
+                    L1 = sylvester(eye(Nz) + gamma*dt*(Dz1 - Cz1), -gamma*dt*(Cr1*Vr0_star)'*(rvals.*Vr0_star), W0_L1);
+                    
+                    [Vr1_ddagger, ~] = qr2(K1, rvals);
+                    [Vz1_ddagger, ~] = qr(L1, 0);
+                
+                    [Vr1_hat, Vz1_hat] = reduced_augmentation([Vr1_ddagger, Vr0], [Vz1_ddagger, Vz0], rvals);
+
+                    W0_S1 = (((rvals .* Vr1_hat)' * [Vr0, Dx1_Vr])*blkdiag(S0, -Dx1_S)*([Vz0, Dx1_Vz]'*Vz1_hat));
+                
+                    S1_hat = sylvester((eye(size(Vr1_hat, 2)) - (gamma*dt*((rvals .* Vr1_hat)')*(Cr1*Vr1_hat))), gamma*dt*((Dz1 - Cz1)*Vz1_hat)'*Vz1_hat, W0_S1);
+                    [Vr1, S1, Vz1, rank] = LoMaC(Vr1_hat, S1_hat, Vz1_hat, rvals, zvals, tolerance, rhoM1, JzM1, kappaM1, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+                    
+                    f_vals_Vr{spatialIndex} = Vr1;
+                    f_vals_S{spatialIndex} = S1;
+                    f_vals_Vz{spatialIndex} = Vz1;
+                end
+    
+                % reassemble into cell array
+                f_vals_low_rank_temp = [f_vals_Vr, f_vals_S, f_vals_Vz];
+    
+
+
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%
+                %%%% ---- STAGE 2 ---- %%%%
+                %%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+                % Periodic BCs
+                leftBC_low_rank{1} = f_vals_low_rank_temp{Nx, 1};
+                leftBC_low_rank{2} = f_vals_low_rank_temp{Nx, 2};
+                leftBC_low_rank{3} = f_vals_low_rank_temp{Nx, 3};
+
+                rightBC_low_rank{1} = f_vals_low_rank_temp{1, 1};
+                rightBC_low_rank{2} = f_vals_low_rank_temp{1, 2};
+                rightBC_low_rank{3} = f_vals_low_rank_temp{1, 3};
+
+                n_left_BC = n_vals(end); n_right_BC = n_vals(1);
+                u_left_BC = u_para(end); u_right_BC = u_para(1);
+                Ta_left_BC = Ta_vals(end); Ta_right_BC = Ta_vals(1);
+                Te_left_BC = Te_vals(end); Te_right_BC = Te_vals(1);
+
+                [n_vals2, u_para2, Ta_vals2, Te_vals2, u_hat2, nu_hat2, S_hat2, Q_hat2, nTe_hat2, kappaTx2] = fluid_solver_IMEX222_stage2(f_vals_low_rank_temp, n_vals, u_para, Ta_vals, Te_vals, n_vals1, u_para1, Ta_vals1, Te_vals1, nu_hat1, S_hat1, Q_hat1, nTe_hat1, dt, dx, dr, dz, rvals, zvals, qa, qe, ma, me, leftBC_low_rank, rightBC_low_rank);
+
+                n_left_BC2 = n_vals2(end); n_right_BC2 = n_vals2(1);
+                u_left_BC2 = u_para2(end); u_right_BC2 = u_para2(1);
+                Ta_left_BC2 = Ta_vals2(end); Ta_right_BC2 = Ta_vals2(1);
+                Te_left_BC2 = Te_vals2(end); Te_right_BC2 = Te_vals2(1);
+
+                nu2 = n_vals2 .* u_para2;
+                nU2 = 0.5*((3/ma)*n_vals2.*Ta_vals2 + n_vals2.*u_para2.^2);
+
+                f_vals_Vr = cell(Nx, 1);
+                f_vals_S = cell(Nx, 1);
+                f_vals_Vz = cell(Nx, 1);
+            
+                parfor spatialIndex = 1:Nx
+                    Vr0 = f_vals_low_rank{spatialIndex, 1};
+                    S0 = f_vals_low_rank{spatialIndex, 2};
+                    Vz0 = f_vals_low_rank{spatialIndex, 3};
+                    Vr1 = f_vals_low_rank_temp{spatialIndex, 1};
+                    S1 = f_vals_low_rank_temp{spatialIndex, 2};
+                    Vz1 = f_vals_low_rank_temp{spatialIndex, 3};
+    
+                    rhoM2 = n_vals2(spatialIndex);
+                    JzM2  = nu2(spatialIndex);
+                    kappaM2 = nU2(spatialIndex);
+    
+                    % Collision-less system --> Fokker-Planck collision operators set to 0
+                    nu_aa1 = 0;
+                    nu_ae1 = 0;
+                    C_aa_r1 = nu_aa1*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Ta_vals1(spatialIndex), ma, rvals, tval, dr);
+                    C_ae_r1 = nu_ae1*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Te_vals1(spatialIndex), ma, rvals, tval, dr);
+                    C_aa_z1 = nu_aa1*GetFokkerPlanckFlux(Az, Bz, Cz, u_para1(spatialIndex), Ta_vals1(spatialIndex), ma, zvals, tval, dz);
+                    C_ae_z1 = nu_ae1*GetFokkerPlanckFlux(Az, Bz, Cz, u_para1(spatialIndex), Te_vals1(spatialIndex), ma, zvals, tval, dz);
+                    Cr1 = C_aa_r1 + C_ae_r1;
+                    Cz1 = C_aa_z1 + C_ae_z1;
+    
+                    nu_aa2 = 0;
+                    nu_ae2 = 0;
+                    C_aa_r2 = nu_aa2*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Ta_vals2(spatialIndex), ma, rvals, tval+dt, dr);
+                    C_ae_r2 = nu_ae2*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Te_vals2(spatialIndex), ma, rvals, tval+dt, dr);
+                    C_aa_z2 = nu_aa2*GetFokkerPlanckFlux(Az, Bz, Cz, u_para2(spatialIndex), Ta_vals2(spatialIndex), ma, zvals, tval+dt, dz);
+                    C_ae_z2 = nu_ae2*GetFokkerPlanckFlux(Az, Bz, Cz, u_para2(spatialIndex), Te_vals2(spatialIndex), ma, zvals, tval+dt, dz);
+                    Cr2 = C_aa_r2 + C_ae_r2;
+                    Cz2 = C_aa_z2 + C_ae_z2;
+                
+                    % discretize Lorentz force
+                    [Dz1, ~] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, n_vals1, Te_vals1, spatialIndex, n_left_BC2, Te_left_BC2, n_right_BC2, Te_right_BC2);
+                    [Dz2, E] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, n_vals2, Te_vals2, spatialIndex, n_left_BC2, Te_left_BC2, n_right_BC2, Te_right_BC2);
+                    spatial_Efield(spatialIndex, 1) = E;
+                
+                    % discretize velocity explicitly
+                    [Dx1_Vr, Dx1_S, Dx1_Vz] = GetVlasovLowRank(delta*dt, dx, zvals, f_vals_low_rank, leftBC_low_rank, rightBC_low_rank, spatialIndex);
+                    [Dx2_Vr, Dx2_S, Dx2_Vz] = GetVlasovLowRank((1-delta)*dt, dx, zvals, f_vals_low_rank_temp, leftBC_low_rank, rightBC_low_rank, spatialIndex);
+
+                    % Reduced Augmentation
+                    % Predict V_dagger using B. Euler for second stage
+                    [Vr1_dagger, ~, Vz1_dagger, ~, ~] = IMEX111(Vr0, S0, Vz0, u_perp, u_para2, dt, dx, tval, rvals, zvals, x_min, x_max, f_vals_low_rank, ma, me, qa, qe, Ar, Az, Br, Bz, Cr, Cz, tolerance, n_vals2, Ta_vals2, Te_vals2, rhoM2, JzM2, kappaM2, spatialIndex, leftBC_low_rank, rightBC_low_rank, n_left_BC2, u_left_BC2, Te_left_BC2, n_right_BC2, u_right_BC2, Te_right_BC2, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+                    [Vr1_star, Vz1_star] = reduced_augmentation([Vr1_dagger, Vr1, Vr0], [Vz1_dagger, Vz1, Vz0], rvals);
+                   
+                    W1_Vr = [Vr0, Dx1_Vr, Dx2_Vr, Cr1*Vr1, Vr1];
+                    W1_S  = blkdiag(S0, -Dx1_S, -Dx2_S, (1-gamma)*dt*S1, (1-gamma)*dt*S1);
+                    W1_Vz = [Vz0, Dx1_Vz, Dx2_Vz, Vz1, (Cz1 - Dz1)*Vz1];
+                    
+                    W1_K2 = W1_Vr*W1_S*(W1_Vz'*Vz1_star);
+                    W1_L2 = (((rvals .* Vr1_star)' * W1_Vr)*W1_S*(W1_Vz'))';
+
+                    % K/L-Step
+                    K2 = sylvester(eye(Nr) - (gamma*dt*Cr2), gamma*dt*((Dz2 - Cz2)*Vz1_star)'*Vz1_star, W1_K2);
+                    L2 = sylvester(eye(Nz) + gamma*dt*(Dz2 - Cz2), -gamma*dt*(Cr2*Vr1_star)'*(rvals.*Vr1_star), W1_L2);
+                
+                    % Get bases
+                    [Vr2_ddagger, ~] = qr2(K2, rvals); [Vz2_ddagger, ~] = qr(L2, 0);
+                
+                    % Reduced Augmentation
+                    [Vr2_hat, Vz2_hat] = reduced_augmentation([Vr2_ddagger, Vr1, Vr0], [Vz2_ddagger, Vz1, Vz0], rvals);
+
+                    W1_S2 = ((rvals .* Vr2_hat)' * W1_Vr)*W1_S*(W1_Vz'*Vz2_hat);
+                
+                    % S-Step
+                    S2_hat = sylvester((eye(size(Vr2_hat, 2)) - (gamma*dt*((rvals .* Vr2_hat)')*(Cr2*Vr2_hat))), gamma*dt*((Dz2 - Cz2)*Vz2_hat)'*Vz2_hat, W1_S2); 
+                    [Vr2, S2, Vz2, rank] = LoMaC(Vr2_hat, S2_hat, Vz2_hat, rvals, zvals, tolerance, rhoM2, JzM2, kappaM2, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+    
+                    f_vals_Vr{spatialIndex} = Vr2;
+                    f_vals_S{spatialIndex} = S2;
+                    f_vals_Vz{spatialIndex} = Vz2;
+    
+                    % use moments from actual solution
+                    spatial_rank_vals(spatialIndex, 1) = rank;
+                    n_vals_diff(spatialIndex) = 2*pi*dr*dz*sum(Vr2 .* rvals)*S2*(sum(Vz2)');
+                    u_vals_diff(spatialIndex) = 2*pi*dr*dz*sum(Vr2 .* rvals)*S2*(sum(Vz2 .* zvals)')./n_vals_diff(spatialIndex);
+                    Ta_vals_diff(spatialIndex) = (2*pi*dr*dz*(sum(Vr2 .* (rvals.^2) .* rvals)*S2*(sum(Vz2)') + (sum(Vr2 .* rvals)*S2*(sum(Vz2 .* (zvals.^2))'))) - n_vals_diff(spatialIndex)*u_vals_diff(spatialIndex)^2)/(3*n_vals_diff(spatialIndex)/ma);
+                end
+    
+                % reassemble into cell array
+                f_vals_low_rank_temp2 = [f_vals_Vr, f_vals_S, f_vals_Vz];
+    
+                f_vals_low_rank_temp = f_vals_low_rank_temp2;
+    
+                n_vals = n_vals2;
+                u_para = u_para2;
+                Ta_vals = Ta_vals2;
+                Te_vals = Te_vals2; 
+    
+                % update mass, momentum, energy (IMEX222)
+                flux_diff_n = flux_diff_n...
+                    + dt*(delta)*(nu_hat1(end) - nu_hat1(1))...
+                    + dt*(1-delta)*(nu_hat2(end) - nu_hat2(1));
+                flux_diff_nu = flux_diff_nu...
+                    + dt*(delta)*((S_hat1(end) - S_hat1(1)))...
+                    - dt*(1-gamma)*(qa/(2*qe*ma))*(n_right_BC1*Te_right_BC1 + n_vals1(end)*Te_vals1(end) - n_vals1(1)*Te_vals1(1) - n_left_BC1*Te_left_BC1)...
+                    + dt*(1-delta)*((S_hat2(end) - S_hat2(1)))...
+                    - dt*(gamma)*(qa/(2*qe*ma))*(n_right_BC2*Te_right_BC2 + n_vals2(end)*Te_vals2(end) - n_vals2(1)*Te_vals2(1) - n_left_BC2*Te_left_BC2);
+                flux_diff_nU = flux_diff_nU ...
+                    + dt*(delta)*(Q_hat1(end) - Q_hat1(1))...
+                    + dt*(delta)*2.5*(u_hat1(end)*nTe_hat1(end) - u_hat1(1)*nTe_hat1(1))...
+                    - dt*(1-gamma)*(kappaTx1(end) - kappaTx1(1))...
+                    + dt*(1-delta)*(Q_hat2(end) - Q_hat2(1))...
+                    + dt*(1-delta)*2.5*(u_hat2(end)*nTe_hat2(end) - u_hat2(1)*nTe_hat2(1))...
+                    - dt*(gamma)*(kappaTx2(end) - kappaTx2(1));
+        end          
+            
+    
+        % update f_vals simultaneously
+        f_vals_low_rank = f_vals_low_rank_temp;
+            
+        avg_ranks(t_index, 1) = mean(spatial_rank_vals);
+        Efield_l2(t_index, 1) = sqrt(dx*sum(abs(spatial_Efield) .^ 2));
+    
+        mass(t_index) = dx*ma*sum(n_vals_diff) + flux_diff_n;
+        momentum(t_index) = dx*ma*sum(n_vals_diff .* u_vals_diff) + flux_diff_nu;
+        energy(t_index) = dx*ma*sum(0.5*((3/ma)*n_vals_diff.*Ta_vals_diff + n_vals_diff.*u_vals_diff.^2) + (3/2)*n_vals_diff.*Te_vals) + flux_diff_nU;
+    
+        n_vals = n_vals_diff;
+        u_para = u_vals_diff;
+        Ta_vals = Ta_vals_diff;
+    
+    end
+
+end
+
+%% Plots
+
+% Electric field (L2 norm)
+figure(1); clf;
+semilogy(tvals, abs(Efield_l2), 'LineWidth', 1.5); hold on;
+semilogy(tvals, Efield_l2(1)*1.3*exp(-0.04*tvals), 'LineWidth', 1.5);
+xlabel('time'); ylabel('||E||_2');
+legend('Numerical', 'Theoretical');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/VFP_weak_landau_damping_Efield_tf_100.fig');
+% exportgraphics(gcf,'./Plots/VFP_weak_landau_damping_Efield_tf_100.pdf','ContentType','vector')
+
+% Avg Rank plot
+figure(2); clf;
+plot(tvals, avg_ranks, 'black-', 'LineWidth', 1.5); hold on;
+xlabel('t'); ylabel('Average rank');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/VFP_weak_landau_damping_rank_plot.fig');
+% exportgraphics(gcf,'./Plots/VFP_weak_landau_damping_rank_plot.pdf','ContentType','vector')
+
+% Conservation
+figure(4); clf; 
+plot(tvals, abs(mass-mass(1))/mass(1), 'LineWidth', 1.5); hold on;
+plot(tvals, abs(momentum-momentum(1)), 'LineWidth', 1.5);
+plot(tvals, abs(energy-energy(1))/energy(1), 'LineWidth', 1.5);
+xlabel('time'); ylabel('Variation'); 
+legend('Relative mass deviation', 'Absolute momentum deviation', 'Relative energy deviation', 'Location', 'northwest');
+fontsize(18,"points"); axis([0, 100, 0, 0.9e-10]);
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/VFP_weak_landau_damping_structure_conservation.fig');
+% exportgraphics(gcf,'./Plots/VFP_weak_landau_damping_structure_conservation.pdf','ContentType','vector');
+
+
+
+
+
+%%%%%% FUNCTIONS %%%%%%
+
+function [Dx_Vr, Dx_S, Dx_Vz] = GetVlasovLowRank(dt, dx, zvals, f_vals_low_rank, leftBC_low_rank, rightBC_low_rank, i)
+
+    Vr_i = f_vals_low_rank{i, 1};
+    S_i  = f_vals_low_rank{i, 2};
+    Vz_i = f_vals_low_rank{i, 3};
+    
+    if i == 1
+
+        Vr_i_pos = f_vals_low_rank{i+1, 1};
+        S_i_pos  = f_vals_low_rank{i+1, 2};
+        Vz_i_pos = f_vals_low_rank{i+1, 3};
+    
+        Vr_i_neg = leftBC_low_rank{1};
+        S_i_neg  = leftBC_low_rank{2};
+        Vz_i_neg = leftBC_low_rank{3};
+    elseif i == size(f_vals_low_rank, 1)
+    
+        Vr_i_pos = rightBC_low_rank{1};
+        S_i_pos  = rightBC_low_rank{2};
+        Vz_i_pos = rightBC_low_rank{3};
+    
+        Vr_i_neg = f_vals_low_rank{i-1, 1};
+        S_i_neg  = f_vals_low_rank{i-1, 2};
+        Vz_i_neg = f_vals_low_rank{i-1, 3};
+    else
+    
+        Vr_i_pos = f_vals_low_rank{i+1, 1};
+        S_i_pos  = f_vals_low_rank{i+1, 2};
+        Vz_i_pos = f_vals_low_rank{i+1, 3};
+    
+        Vr_i_neg = f_vals_low_rank{i-1, 1};
+        S_i_neg  = f_vals_low_rank{i-1, 2};
+        Vz_i_neg = f_vals_low_rank{i-1, 3};
+    end
+    
+    Dx_Vr = [Vr_i, Vr_i_neg, Vr_i_pos, Vr_i];
+    Dx_S = (dt/dx)*blkdiag(S_i, -S_i_neg, S_i_pos, -S_i);
+    Dx_Vz = [Vz_i.*max(zvals, 0), Vz_i_neg.*max(zvals, 0), Vz_i_pos.*min(zvals, 0), Vz_i.*min(zvals, 0)];
+
+end
+
+function [Lorentz, E] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, ne_vals, Te_vals, i, n_leftBC, Te_leftBC, n_rightBC, Te_rightBC)
+    Nx = numel(ne_vals);
+    Nz = numel(zvals);
+    dz = zvals(2) - zvals(1);
+    
+    % first compute E_para using Generalized Ohm's Law
+    if i == 1
+        E = (1/(2*dx*ne_vals(i)*qe))*(ne_vals(i+1)*Te_vals(i+1) - n_leftBC*Te_leftBC); % centered difference
+    elseif i == Nx
+        E = (1/(2*dx*ne_vals(i)*qe))*(n_rightBC*Te_rightBC - ne_vals(i-1)*Te_vals(i-1)); % centered difference
+    else
+        E = (1/(2*dx*ne_vals(i)*qe))*(ne_vals(i+1)*Te_vals(i+1) - ne_vals(i-1)*Te_vals(i-1)); % centered difference
+    end
+    
+    % NOTE: We assume that the function (maxwellian at BC) decays to zero at boundaries, allowing us
+    % to assume homogenous dirichlet BCs for this diff mtx
+    
+    diff_mtx_pos = (1/(2*dz))*(spdiags(3*ones(Nz, 1), 0, Nz, Nz) + spdiags(-4*ones(Nz, 1), -1, Nz, Nz) + spdiags(ones(Nz, 1), -2, Nz, Nz));
+    diff_mtx_neg = -1*diff_mtx_pos';
+    Lorentz = max(E, 0)*(qa/ma)*diff_mtx_pos + min(E, 0)*(qa/ma)*diff_mtx_neg; 
+end
+
+function [Flux] = GetFokkerPlanckFlux(A, B, C, u, T, m, xvals, t, dx)
+
+    % using Chang Cooper scheme
+    N = numel(xvals);
+    A = A(u, xvals, t);
+    B = B(u, xvals(1:N-1) + dx/2, t);
+    C = C(u, xvals(1:N-1) + dx/2, t, T, m);
+    
+    w = dx*B./(C + 1e-14); % prevent zero division
+    delta = (1 ./ w) - (1 ./ (exp(w) - 1));
+
+    F1 = -((1/dx)*C - delta.*B);
+    F2 = (1 - delta).*B + (1/dx)*C;
+
+    F_pos = spdiags([F1;0], 0, N, N) + spdiags([0;F2], 1, N, N);
+    F_neg = spdiags([0; F2], 0, N, N) + spdiags(F1, -1, N, N);
+
+    Flux = diag(1./A)*(1/dx)*(F_pos - F_neg);
+end
+
+function [Vr, S, Vz, rank, E] = IMEX111(Vr0, S0, Vz0, u_perp, u_para, dt, dx, tval, rvals, zvals, x_min, x_max, f_vals_low_rank, ma, me, qa, qe, Ar, Az, Br, Bz, Cr, Cz, tolerance, n_vals, Ta_vals, Te_vals, rhoM, JzM, kappaM, spatialIndex, leftBC_low_rank, rightBC_low_rank, n_left_BC, u_left_BC, Te_left_BC, n_right_BC, u_right_BC, Te_right_BC, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    Nr = numel(rvals);
+    Nz = numel(zvals);
+
+    % Collision-less system --> Fokker-Planck collision operators set to 0
+    nu_aa = 0;
+    nu_ae = 0;
+    C_aa_r1 = nu_aa*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Ta_vals(spatialIndex), ma, rvals, tval, dr);
+    C_ae_r1 = nu_ae*GetFokkerPlanckFlux(Ar, Br, Cr, u_perp(spatialIndex), Te_vals(spatialIndex), ma, rvals, tval, dr);
+    C_aa_z1 = nu_aa*GetFokkerPlanckFlux(Az, Bz, Cz, u_para(spatialIndex), Ta_vals(spatialIndex), ma, zvals, tval, dz);
+    C_ae_z1 = nu_ae*GetFokkerPlanckFlux(Az, Bz, Cz, u_para(spatialIndex), Te_vals(spatialIndex), ma, zvals, tval, dz);
+    Cr1 = C_aa_r1 + C_ae_r1;
+    Cz1 = C_aa_z1 + C_ae_z1;
+
+    % discretize Lorentz force
+    [Dz1, E] = GetLorentz(dx, x_min, x_max, zvals, ma, qe, qa, n_vals, Te_vals, spatialIndex, n_left_BC, Te_left_BC, n_right_BC, Te_right_BC);
+
+    % discretize velocity explicitly
+    [Dx_Vr, Dx_S, Dx_Vz] = GetVlasovLowRank(dt, dx, zvals, f_vals_low_rank, leftBC_low_rank, rightBC_low_rank, spatialIndex);
+
+    Vr0_star = Vr0;
+    Vz0_star = Vz0;
+
+    W0_K1 = [Vr0, Dx_Vr]*blkdiag(S0, -Dx_S)*([Vz0, Dx_Vz]'*Vz0_star);
+    W0_L1 = [Vz0, Dx_Vz]*blkdiag(S0, -Dx_S)*([Vr0, Dx_Vr]'*(rvals .* Vr0_star));
+
+    K1 = sylvester(eye(Nr) - (dt*Cr1), dt*((Dz1 - Cz1)*Vz0_star)'*Vz0_star, W0_K1);
+    L1 = sylvester(eye(Nz) + dt*(Dz1 - Cz1), -dt*(Cr1*Vr0_star)'*(rvals.*Vr0_star), W0_L1);
+
+    [Vr1_ddagger, ~] = qr2(K1, rvals);
+    [Vz1_ddagger, ~] = qr(L1, 0);
+
+    [Vr1_hat, Vz1_hat] = reduced_augmentation([Vr1_ddagger, Vr0], [Vz1_ddagger, Vz0], rvals);
+
+    W0_S1 = (((rvals .* Vr1_hat)' * [Vr0, Dx_Vr])*blkdiag(S0, -Dx_S)*([Vz0, Dx_Vz]'*Vz1_hat));
+
+    S1_hat = sylvester((eye(size(Vr1_hat, 2)) - (dt*((rvals .* Vr1_hat)')*(Cr1*Vr1_hat))), dt*((Dz1 - Cz1)*Vz1_hat)'*Vz1_hat, W0_S1);
+    [Vr, S, Vz, rank] = LoMaC(Vr1_hat, S1_hat, Vz1_hat, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared);
+
+end
+
+function [Vr, Vz] = reduced_augmentation(Vr_aug, Vz_aug, rvals)
+    tolerance = 1e-14;
+    [Qr, Rr] = qr2(Vr_aug, rvals);
+    [Qz, Rz] = qr(Vz_aug, 0);
+    [Ur, Sr, ~] = svd(Rr, 0);
+    [Uz, Sz, ~] = svd(Rz, 0);
+    rr = find(diag(Sr) > tolerance, 1, 'last');
+    rz = find(diag(Sz) > tolerance, 1, 'last');
+    rank = max(rr, rz);
+    rank = min(rank, min(size(Ur, 2), size(Uz, 2)));
+    Vr = Qr*Ur(:, 1:rank);
+    Vz = Qz*Uz(:, 1:rank);
+end
+
+function [Q, R] = qr2(X, rvals)
+    [Q, R] = qr(sqrt(rvals) .* X, 0);
+    Q = Q ./ sqrt(rvals);
+end
+
+function [U, S, V] = svd2(X, rvals)
+    [U, S, V] = svd(sqrt(rvals) .* X, 0);
+    U = U./sqrt(rvals);
+end
+
+function [X, R, Z, dx, dr, dz] = GetRZ(Nx, Nr, Nz, interval)
+    xvals = linspace(interval(1), interval(2), Nx+1)';
+    rvals = linspace(interval(3), interval(4), Nr+1)';
+    zvals = linspace(interval(5), interval(6), Nz+1)';
+    dx = xvals(2) - xvals(1);
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+    xmid = xvals(1:end-1) + dx/2; % centered mesh
+    rmid = rvals(1:end-1) + dr/2; % centered mesh
+    zmid = zvals(1:end-1) + dz/2; % centered mesh
+    [R, Z] = meshgrid(rmid, zmid); 
+    X = xmid; R = R'; Z = Z';
+end
+
+
+
+% ------- Fluid Solver ------- %
+function [n1, u_para1, T_a1, T_e1, u_para0_half_nodes, nu_hat1, S_hat1, Q_hat1, nTe_hat1, kappaTx] = fluid_solver_IMEX111(f_vals_low_rank, n0, u_para0, T_a0, T_e0, dt, dx, dv_perp, dv_para, v_perp, v_para, qa, qe, ma, me, leftBC_low_rank, rightBC_low_rank, n_BC_left, u_para_BC_left, Te_BC_left, n_BC_right, u_para_BC_right, Te_BC_right)
+    Nx = numel(n0); % max val of i, j
+
+    n0_pos = [n0; n_BC_right]; n0_neg = [n_BC_left; n0];
+    u_para0_half_nodes = ([u_para_BC_left; u_para0] + [u_para0; u_para_BC_right])/2;
+    U0 = 0.5*((3/ma)*T_a0 + u_para0.^2);
+
+    % first, compute fluxes via summation
+    [nu_hat1, S_hat1, Q_hat1] = get_fluxes_low_rank(f_vals_low_rank, v_perp, v_para, dv_perp, dv_para, leftBC_low_rank, rightBC_low_rank);
+    nTe_hat1 = ((n0_neg.*[Te_BC_left; T_e0]).*(u_para0_half_nodes > 0) + (n0_pos.*[T_e0; Te_BC_right]).*(u_para0_half_nodes <= 0)); % upwinding
+
+    % shift bounds to get flux pos/neg
+    nu_hat1_pos = nu_hat1(2:end); nu_hat1_neg = nu_hat1(1:end-1);
+
+    S_hat1_pos = S_hat1(2:end); S_hat1_neg = S_hat1(1:end-1);
+    Q_hat1_pos = Q_hat1(2:end); Q_hat1_neg = Q_hat1(1:end-1);
+    nTe_hat1_pos = nTe_hat1(2:end); nTe_hat1_neg = nTe_hat1(1:end-1);
+  
+    % explicitly find n via Forward Euler
+    n1 = n0 - (dt/dx)*(nu_hat1_pos - nu_hat1_neg); % now find n_i+1, n_i-1
+    n_pos = [n1(2:end); n1(1)]; n_neg = [n1(end); n1(1:end-1)];
+
+    % ---- init y_vec, R_norm ----  
+    y = [n1.*u_para0; n1.*U0; T_e0];
+
+    nu = y(1:Nx); 
+    nU = y(Nx+1:2*Nx); 
+    T_e = y(2*Nx+1:end);
+    Te_pos = [T_e(2:end); T_e(1)]; Te_neg = [T_e(end); T_e(1:end-1)];
+    nTe_pos = n_pos.*Te_pos; nTe_neg = n_neg.*Te_neg;
+
+    % Scale electron conductivity by 10x to ensure isothermal electrons
+    kappa_scale = 10;
+    kappa_pos = kappa_scale*(3.2/(2*sqrt(2*me)))*((Te_pos.^(5/2) + T_e.^(5/2)));
+    kappa_neg = kappa_scale*(3.2/(2*sqrt(2*me)))*((T_e.^(5/2) + Te_neg.^(5/2)));
+
+    R1 = nu - (n0.*u_para0) + (dt/dx).*(S_hat1_pos - S_hat1_neg) - ((dt*qa)/(2*dx*qe*ma)).*((n_pos.*Te_pos) - (n_neg.*Te_neg));
+    R2 = nU - (n0.*U0) + (dt/dx).*(Q_hat1_pos - Q_hat1_neg) - (((dt*qa*nu)./(2*dx*qe*n1)).*((n_pos.*Te_pos) - (n_neg.*Te_neg))); 
+    R3 = (n1.*T_e) - (n0.*T_e0) + ((5*dt)/(3*dx)).*((u_para0_half_nodes(2:end).*nTe_hat1_pos) - (u_para0_half_nodes(1:end-1).*nTe_hat1_neg)) - (((dt*(nu./n1))./(3*dx)).*(nTe_pos - nTe_neg)) - (((2*dt)/(3*dx.^2)) .* ((kappa_pos.*(Te_pos - T_e)) - (kappa_neg.*(T_e - Te_neg))));
+    R = [R1; R2; R3];
+
+    tol = 1e-12;
+    iters = 0;
+    err = 1;
+   
+    while err > tol
+        % define partial derivatives of residual
+        nu_nu = spdiags(ones(Nx), 0, Nx, Nx);
+        nu_nU = spdiags(zeros(Nx),0, Nx, Nx);
+        nu_Te = gallery('tridiag', (dt*qa*n1(1:end-1))/(2*dx*qe*ma), zeros(Nx,1), -(dt*qa*n1(2:end))/(2*dx*qe*ma));
+    
+        nU_nu = diag( ((-dt*qa)./(2*dx.*qe.*n1)).*((n_pos.*Te_pos) - (n_neg.*Te_neg)) );
+        nU_nU = spdiags(ones(Nx), 0, Nx, Nx);
+        nU_Te_mid = 0*((3*dt*sqrt(2*me))./(2*(ma.^2))).*(((n1.^2)./(T_e.^(3/2)) + (ma./(T_e.^(5/2))).*((2*n1.*nU) - (nu.^2)) )); 
+        nU_Te = gallery('tridiag', (dt.*qa.*nu(2:end).*(n1(1:end-1)./n1(2:end)))./(2*dx*qe), nU_Te_mid, -(dt.*qa.*nu(1:end-1).*(n1(2:end)./n1(1:end-1)))/(2*dx*qe) );
+    
+        Te_nu = diag(-(dt.*((n_pos.*Te_pos) - (n_neg.*Te_neg)))./(3*dx*n1));
+        Te_nU = spdiags(zeros(Nx), 0, Nx, Nx);
+        
+        Te_Te_left = ((dt.*nu.*n_neg)./(3*dx.*n1)) + (((dt*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(Te_neg.^(3/2))/2).*(T_e - Te_neg)) - (T_e.^(5/2) + Te_neg.^(5/2)))); 
+        Te_Te_left = Te_Te_left(2:end);
+
+        Te_Te_mid = n1 - (((dt*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(T_e.^(3/2))./2).*(Te_pos - T_e)) - ((5.*(T_e.^(3/2))/2).*(T_e - Te_neg)) - (Te_pos.^(5/2) + T_e.^(5/2)) - (T_e.^(5/2) + Te_neg.^(5/2))));
+
+        Te_Te_right = ((-dt.*nu.*n_pos)./(3*dx.*n1)) - (((dt*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(Te_pos.^(3/2))/2).*(Te_pos - T_e)) + (Te_pos.^(5/2) + T_e.^(5/2)))); 
+        Te_Te_right = Te_Te_right(1:end-1);
+
+        Te_Te = gallery('tridiag', Te_Te_left, Te_Te_mid, Te_Te_right);
+
+        P = [nu_nu, nu_nU, nu_Te;
+             nU_nu, nU_nU, nU_Te;
+             Te_nu, Te_nU, Te_Te];
+     
+        dy = -P\R; % solve for delta y at time l+1
+        y = y + dy;
+
+        % update y_vec stuff
+        nu = y(1:Nx); 
+        nU = y(Nx+1:2*Nx); 
+        T_e = y(2*Nx+1:end);
+        Te_pos = [T_e(2:end); T_e(1)]; Te_neg = [T_e(end); T_e(1:end-1)];
+        nTe_pos = n_pos.*Te_pos; nTe_neg = n_neg.*Te_neg;
+
+        kappa_pos = (kappa_scale*3.2/(2*sqrt(2*me)))*((Te_pos.^(5/2) + T_e.^(5/2))); 
+        kappa_neg = (kappa_scale*3.2/(2*sqrt(2*me)))*((T_e.^(5/2) + Te_neg.^(5/2)));
+        
+        R1 = nu - (n0.*u_para0) + (dt/dx).*(S_hat1_pos - S_hat1_neg) - ((dt*qa)/(2*dx*qe*ma)).*((n_pos.*Te_pos) - (n_neg.*Te_neg));
+        R2 = nU - (n0.*U0) + (dt/dx).*(Q_hat1_pos - Q_hat1_neg) - (((dt*qa*nu)./(2*dx*qe*n1)).*((n_pos.*Te_pos) - (n_neg.*Te_neg))); 
+        R3 = (n1.*T_e) - (n0.*T_e0) + ((5*dt)/(3*dx)).*((u_para0_half_nodes(2:end).*nTe_hat1_pos) - (u_para0_half_nodes(1:end-1).*nTe_hat1_neg)) - (((dt*(nu./n1))./(3*dx)).*(nTe_pos - nTe_neg)) - (((2*dt)/(3*dx.^2)) .* ((kappa_pos.*(Te_pos - T_e)) - (kappa_neg.*(T_e - Te_neg))));
+        R = [R1; R2; R3];
+
+        iters = iters + 1;
+        if iters > 500
+            disp(['Iteration count=500, error=', num2str(max(abs(R))), ', tolerance=', num2str(tol)]);
+            break
+        end
+
+        err = max(abs(R));
+    end
+  
+    % parameters to return
+    nu1 = (y(1:Nx));
+    nU1 = y(Nx+1:2*Nx);
+    T_e1 = y(2*Nx+1:end);
+
+    u_para1 = nu1 ./ n1;
+    T_a1 = (ma/3)*(2*nU1./n1 - (nu1.^2)./(n1.^2));
+
+    Te_all = [T_e1(end); T_e1; T_e1(1)]; % periodic BCs
+    kappaTx = (kappa_scale*3.2/(2*sqrt(2*me)*dx))*(Te_all(1:end-1).^(2.5)+Te_all(2:end).^(2.5)).*(Te_all(2:end)-Te_all(1:end-1));
+end
+
+function [n2, u_para2, T_a2, T_e2, u_para1_half_nodes, nu_hat2, S_hat2, Q_hat2, nTe_hat2, kappaTx2] = fluid_solver_IMEX222_stage2(f1_vals_low_rank, n0, u_para0, T_a0, T_e0, n1, u_para1, T_a1, T_e1, nu_hat1, S_hat1, Q_hat1, nTe_hat1, dt, dx, dv_perp, dv_para, v_perp, v_para, qa, qe, ma, me, leftBC_low_rank, rightBC_low_rank)
+    % Completes the second state of the IMEX222 fluid solver
+    % using information from the first stage passed in as arguments
+
+    % Butcher table parameters
+    gamma = 1 - (sqrt(2)/2);
+    delta = 1 - (1/(2*gamma));
+    dt1 = gamma*dt;
+    dt2 = (1-gamma)*dt;
+
+    Nx = numel(n0); % max val of i, j
+
+    % get boundary conditions
+    u_para0_half_nodes = ([u_para0(end); u_para0] + [u_para0; u_para0(1)])/2;
+    U0 = 0.5*((3/ma)*T_a0 + u_para0.^2);
+
+    %%% SAVE STUFF FROM STAGE 1 %%%
+    % shift bounds to get flux pos/neg
+    nu_hat1_pos = nu_hat1(2:end); nu_hat1_neg = nu_hat1(1:end-1);
+    S_hat1_pos = S_hat1(2:end); S_hat1_neg = S_hat1(1:end-1);
+    Q_hat1_pos = Q_hat1(2:end); Q_hat1_neg = Q_hat1(1:end-1);
+    nTe_hat1_pos = nTe_hat1(2:end); nTe_hat1_neg = nTe_hat1(1:end-1);
+
+    % define A0 vals for later
+    An_0 = - (1/dx)*(nu_hat1_pos - nu_hat1_neg);
+    Anu_0 = - (1/dx)*(S_hat1_pos - S_hat1_neg);
+    AnU_0 = - (1/dx).*(Q_hat1_pos - Q_hat1_neg);
+    AnTe_0 = - ((5)/(3*dx)).*((u_para0_half_nodes(2:end).*nTe_hat1_pos) - (u_para0_half_nodes(1:end-1).*nTe_hat1_neg));
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%% ---- STAGE TWO ---- %%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+    nu1 = n1.*u_para1;
+    nU1 = 0.5*((3/ma)*n1.*T_a1 + n1.*u_para1.^2);
+
+    n1_pos = [n1(2:end); n1(1)]; n1_neg = [n1(end); n1(1:end-1)];
+    u_para1_half_nodes = ([u_para1(end); u_para1] + [u_para1; u_para1(1)])/2;
+    Te1_pos = [T_e1(2:end); T_e1(1)]; Te1_neg = [T_e1(end); T_e1(1:end-1)];
+    nTe1_pos = n1_pos.*Te1_pos; nTe1_neg = n1_neg.*Te1_neg;
+
+    % Scale electron conductivity by 10x to ensure isothermal electrons
+    kappa_scale = 10;
+    kappa1_pos = kappa_scale*(3.2/(2*sqrt(2*me)))*((Te1_pos.^(5/2) + T_e1.^(5/2)));
+    kappa1_neg = kappa_scale*(3.2/(2*sqrt(2*me)))*((T_e1.^(5/2) + Te1_neg.^(5/2)));
+
+    % recompute fluxes using solution from first time-step
+    [nu_hat2, S_hat2, Q_hat2] = get_fluxes_low_rank(f1_vals_low_rank, v_perp, v_para, dv_perp, dv_para, leftBC_low_rank, rightBC_low_rank);
+    nTe_hat2 = (([n1(end); n1].*[T_e1(end); T_e1]).*(u_para1_half_nodes > 0) + ([n1; n1(1)].*[T_e1; T_e1(1)]).*(u_para1_half_nodes <= 0)); % upwinding
+
+    % shift bounds to get flux pos/neg
+    nu_hat2_pos = nu_hat2(2:end); nu_hat2_neg = nu_hat2(1:end-1);
+
+    S_hat2_pos = S_hat2(2:end); S_hat2_neg = S_hat2(1:end-1);
+    Q_hat2_pos = Q_hat2(2:end); Q_hat2_neg = Q_hat2(1:end-1);
+    nTe_hat2_pos = nTe_hat2(2:end); nTe_hat2_neg = nTe_hat2(1:end-1);
+
+    % explicitly find n via Forward Euler
+    n2 = n0 + (delta*dt*An_0) - (1-delta)*(dt/dx)*(nu_hat2_pos - nu_hat2_neg);
+    n2_pos = [n2(2:end); n2(1)]; n2_neg = [n2(end); n2(1:end-1)];
+
+     % ---- init y_vec, R_norm ----
+    y = [n2.*u_para0; n2.*U0; T_e0];
+
+    nu = y(1:Nx); 
+    nU = y(Nx+1:2*Nx);
+    T_e = y(2*Nx+1:end);
+    Te_pos = [T_e(2:end); T_e(1)]; Te_neg = [T_e(end); T_e(1:end-1)];
+    nTe_pos = n2_pos.*Te_pos; nTe_neg = n2_neg.*Te_neg;
+
+    n_pos = n2_pos; n_neg = n2_neg;
+    kappa_pos = kappa_scale*(3.2/(2*sqrt(2*me)))*((Te_pos.^(5/2) + T_e.^(5/2)));
+    kappa_neg = kappa_scale*(3.2/(2*sqrt(2*me)))*((T_e.^(5/2) + Te_neg.^(5/2))); 
+
+    R1 = nu - (n0.*u_para0)...
+            - (delta*dt*Anu_0)...
+            + ((1-delta)*dt/dx)*(S_hat2_pos - S_hat2_neg) ... 
+            - ((dt2*qa)/(2*dx*qe*ma)).*((n1_pos.*Te1_pos) - (n1_neg.*Te1_neg)) ...
+            - ((dt1*qa)/(2*dx*qe*ma)).*((n2_pos.*Te_pos) - (n2_neg.*Te_neg));
+    R2 = nU - (n0.*U0)...
+            - (delta*dt*AnU_0) ...
+            + ((1-delta)*dt/dx).*(Q_hat2_pos - Q_hat2_neg) ...
+            - (((dt2*qa*nu1)./(2*dx*qe*n1)).*((n1_pos.*Te1_pos) - (n1_neg.*Te1_neg)))...
+            - (((dt1*qa*nu)./(2*dx*qe*n2)).*((n2_pos.*Te_pos) - (n2_neg.*Te_neg)));
+    R3 = (n2.*T_e) - (n0.*T_e0) - (delta*dt*AnTe_0) + (1-delta)*dt*(5/(3*dx)).*((u_para1_half_nodes(2:end).*nTe_hat2_pos) - (u_para1_half_nodes(1:end-1).*nTe_hat2_neg)) ...
+            - (((dt2*u_para1)./(3*dx)).*(nTe1_pos - nTe1_neg)) - (((2*dt2)/(3*dx.^2)) .* ((kappa1_pos.*(Te1_pos - T_e1)) - (kappa1_neg.*(T_e1 - Te1_neg))))... 
+            - (((dt1*(nu./n2))./(3*dx)).*(nTe_pos - nTe_neg)) - (((2*dt1)/(3*dx.^2)) .* ((kappa_pos.*(Te_pos - T_e)) - (kappa_neg.*(T_e - Te_neg)))); 
+    R = [R1; R2; R3];
+
+    tol = 1e-12;
+    iters = 0;
+    err = 1;
+
+    while err > tol
+
+        % define partial derivatives of residual
+        nu_nu = spdiags(ones(Nx), 0, Nx, Nx);
+        nu_nU = spdiags(zeros(Nx),0, Nx, Nx);
+        nu_Te = gallery('tridiag', (dt1*qa*n2(1:end-1))/(2*dx*qe*ma), zeros(Nx,1), -(dt1*qa*n2(2:end))/(2*dx*qe*ma));
+    
+        nU_nu = diag( ((-dt1*qa)./(2*dx.*qe.*n2)).*((n_pos.*Te_pos) - (n_neg.*Te_neg)) );
+        nU_nU = spdiags(ones(Nx), 0, Nx, Nx);
+        nU_Te_mid = 0*((3*dt1*sqrt(2*me))./(2*(ma.^2))).*(((n2.^2)./(T_e.^(3/2))  + (ma./(T_e.^(5/2))).*((2*n2.*nU) - (nu.^2)) ));
+        nU_Te = gallery('tridiag', (dt1.*qa.*nu(2:end).*(n2(1:end-1)./n2(2:end)))./(2*dx*qe), nU_Te_mid, -(dt1.*qa.*nu(1:end-1).*(n2(2:end)./n2(1:end-1)))/(2*dx*qe) );
+    
+        Te_nu = diag(-(dt1.*((n_pos.*Te_pos) - (n_neg.*Te_neg)))./(3*dx*n2));
+        Te_nU = spdiags(zeros(Nx), 0, Nx, Nx);
+        
+        Te_Te_left = ((dt1.*nu.*n_neg)./(3*dx.*n2)) + (((dt1*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(Te_neg.^(3/2))/2).*(T_e - Te_neg)) - (T_e.^(5/2) + Te_neg.^(5/2))));
+        Te_Te_left = Te_Te_left(2:end);
+        
+        Te_Te_mid = n2 - (((dt1*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(T_e.^(3/2))./2).*(Te_pos - T_e)) - (Te_pos.^(5/2) + T_e.^(5/2)) - ((5.*(T_e.^(3/2))/2).*(T_e - Te_neg)) - (T_e.^(5/2) + Te_neg.^(5/2)))); % turns off DFP operator - ((2*dt1*sqrt(2*me)./(2*ma)).*(((-ma./(T_e.^(5/2))).*(2*n2.*nU - (nu.^2)) + ((n2.^2)./(T_e.^(3/2))))));
+        
+        Te_Te_right = ((-dt1.*nu.*n_pos)./(3*dx.*n2)) - (((dt1*kappa_scale*3.2)./(3*(dx.^2).*sqrt(2*me))).*(((5.*(Te_pos.^(3/2))/2).*(Te_pos - T_e)) + (Te_pos.^(5/2) + T_e.^(5/2))));
+        Te_Te_right = Te_Te_right(1:end-1);
+        
+        Te_Te = gallery('tridiag', Te_Te_left, Te_Te_mid, Te_Te_right);
+
+        P = [nu_nu, nu_nU, nu_Te;
+             nU_nu, nU_nU, nU_Te;
+             Te_nu, Te_nU, Te_Te];
+     
+        dy = -P\R; % solve for delta y at time l+1
+        y = y + dy;
+
+        % update y_vec stuff
+        nu = y(1:Nx); 
+        nU = y(Nx+1:2*Nx); 
+        T_e = y(2*Nx+1:end);
+        Te_pos = [T_e(2:end); T_e(1)]; Te_neg = [T_e(end); T_e(1:end-1)];
+        nTe_pos = n_pos.*Te_pos; nTe_neg = n_neg.*Te_neg;
+
+        kappa_pos = (kappa_scale*3.2/(2*sqrt(2*me)))*((Te_pos.^(5/2) + T_e.^(5/2)));
+        kappa_neg = (kappa_scale*3.2/(2*sqrt(2*me)))*((T_e.^(5/2) + Te_neg.^(5/2)));
+
+        R1 = nu - (n0.*u_para0) - (delta*dt*Anu_0) + ((1-delta)*dt/dx)*(S_hat2_pos - S_hat2_neg) ... 
+                - ((dt2*qa)/(2*dx*qe*ma)).*((n1_pos.*Te1_pos) - (n1_neg.*Te1_neg)) ...
+                - ((dt1*qa)/(2*dx*qe*ma)).*((n2_pos.*Te_pos) - (n2_neg.*Te_neg));
+        R2 = nU - (n0.*U0)      - (delta*dt*AnU_0) + ((1-delta)*dt/dx).*(Q_hat2_pos - Q_hat2_neg) ...
+                - (((dt2*qa*nu1)./(2*dx*qe*n1)).*((n1_pos.*Te1_pos) - (n1_neg.*Te1_neg))) ... 
+                - (((dt1*qa*nu)./(2*dx*qe*n2)).*((n2_pos.*Te_pos) - (n2_neg.*Te_neg)));       
+        R3 = (n2.*T_e) - (n0.*T_e0) ...
+                - (delta*dt*AnTe_0) ...
+                + (1-delta)*dt*(5/(3*dx)).*((u_para1_half_nodes(2:end).*nTe_hat2_pos) - (u_para1_half_nodes(1:end-1).*nTe_hat2_neg)) ...
+                - (((dt2*nu1./n1)./(3*dx)).*(nTe1_pos - nTe1_neg))...
+                - (((2*dt2)/(3*dx.^2)) .* ((kappa1_pos.*(Te1_pos - T_e1)) - (kappa1_neg.*(T_e1 - Te1_neg))))...
+                - (((dt1*(nu./n2))./(3*dx)).*(nTe_pos - nTe_neg))...
+                - (((2*dt1)/(3*dx.^2)) .* ((kappa_pos.*(Te_pos - T_e)) - (kappa_neg.*(T_e - Te_neg))));
+        R = [R1; R2; R3];
+
+        iters = iters + 1;
+        if iters > 500
+            disp(['Iteration count=500, error=', num2str(max(abs(R))), ', tolerance=', num2str(tol)]);
+            break
+        end
+
+        err = max(abs(R));
+    end
+
+    % return moments
+    nu2 = y(1:Nx);
+    nU2 = y(Nx+1:2*Nx);
+    T_e2 = y(2*Nx+1:end);
+
+    u_para2 = nu2 ./ n2;
+    T_a2 = (ma/3)*(2*nU2./n2 - (nu2.^2)./(n2.^2));
+    Te_all = [T_e2(end); T_e2; T_e2(1)];
+    kappaTx2 = (kappa_scale*3.2/(2*sqrt(2*me)*dx))*(Te_all(1:end-1).^(2.5)+Te_all(2:end).^(2.5)).*(Te_all(2:end)-Te_all(1:end-1));
+end
+
+function [nu_hat, S_hat, Q_hat] = get_fluxes_low_rank(f_vals_low_rank, v_perp, v_para, dv_perp, dv_para, leftBC_low_rank, rightBC_low_rank)
+    Nx = size(f_vals_low_rank, 1);
+    
+    nu_hat = zeros(Nx+1, 1);
+    S_hat = zeros(Nx+1, 1);
+    Q_hat = zeros(Nx+1, 1);
+    
+    v_para_split_idx = find(v_para > 0, 1); % upwinding!
+    for i = 0:Nx % loop through spatial nodes    
+        if i == 0 % use left BC
+            Vr_left = leftBC_low_rank{1};
+            S_left = leftBC_low_rank{2};
+            Vz_left = leftBC_low_rank{3};
+    
+            Vr_right = f_vals_low_rank{i+1, 1};
+            S_right  = f_vals_low_rank{i+1, 2};
+            Vz_right = f_vals_low_rank{i+1, 3};
+        elseif i == Nx % use right BC
+            Vr_left = f_vals_low_rank{i, 1};
+            S_left  = f_vals_low_rank{i, 2};
+            Vz_left = f_vals_low_rank{i, 3};
+    
+            Vr_right = rightBC_low_rank{1};
+            S_right = rightBC_low_rank{2};
+            Vz_right = rightBC_low_rank{3};
+        else
+            Vr_left = f_vals_low_rank{i, 1};
+            S_left  = f_vals_low_rank{i, 2};
+            Vz_left = f_vals_low_rank{i, 3};
+    
+            Vr_right = f_vals_low_rank{i+1, 1};
+            S_right  = f_vals_low_rank{i+1, 2};
+            Vz_right = f_vals_low_rank{i+1, 3};
+        end
+    
+        Vz_pos = zeros(size(Vz_right, 1), size(Vz_right, 2));
+        Vz_neg = zeros(size(Vz_left, 1), size(Vz_left, 2));
+    
+        Vr = [Vr_right, Vr_left];
+        S  = blkdiag(S_right, S_left);
+        Vz_pos(1:v_para_split_idx-1, :) = Vz_right(1:v_para_split_idx-1, :);
+        Vz_neg(v_para_split_idx:end, :) = Vz_left(v_para_split_idx:end, :);
+        Vz = [Vz_pos, Vz_neg];
+    
+        nu_hat(i+1) = 2*pi*dv_perp*dv_para*(sum(Vr .* v_perp)*S*(sum(Vz .* v_para)'));
+        S_hat(i+1)  = 2*pi*dv_perp*dv_para*(sum(Vr .* v_perp)*S*(sum(Vz .* (v_para.^2))'));
+        Q_hat(i+1)  = pi*dv_perp*dv_para*((sum(Vr .* (v_perp.^2) .* v_perp)*S*(sum(Vz .* v_para)')) + (sum(Vr .* v_perp)*S*(sum(Vz .* (v_para.^2) .* v_para)')));
+    end
+end
+
+
+% ------- LoMaC Truncation ------- %
+function [Vr, S, Vz, rank] = LoMaC(Vr, S, Vz, rvals, zvals, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
+    % LoMaC truncates given maxwellian (assumed low-rank) to given tolerance while conserving
+    % macroscopic quantities.
+
+    Nr = numel(rvals); Nz = numel(zvals);
+    dr = rvals(2) - rvals(1);
+    dz = zvals(2) - zvals(1);
+
+    p = 2*pi*dr*dz*sum(Vr .* rvals)*S*(sum(Vz)');
+    J = 2*pi*dr*dz*(sum(Vr .* rvals)*S*sum(Vz.*zvals)');
+    k = pi*dr*dz*(sum(Vr.*(rvals.^2).*rvals)*S*(sum(Vz)') + sum(Vr.*rvals)*S*(sum(Vz.*(zvals.^2)))');
+
+    % Step 2: Scale by maxwellian to ensure inner product is well defined
+    % (f -> 0 as v -> infinity)
+    f1_proj_S_mtx11 = (p / w_norm_1_squared) - ((2*k - c*p)*c / w_norm_v2_squared);
+    f1_proj_S_mtx12 = (J / w_norm_v_squared);
+    f1_proj_S_mtx13 = ((2*k - c*p) / w_norm_v2_squared);
+
+    proj_basis_r = wr.*[ones(Nr, 1), rvals.^2];
+    proj_basis_z = wz.*[ones(Nz, 1), zvals, zvals.^2];
+    f1_proj_S_mtx   = [f1_proj_S_mtx11, f1_proj_S_mtx12, f1_proj_S_mtx13;
+                       f1_proj_S_mtx13,               0,               0];
+
+    % f2 = f - f1 (via SVD)
+    f2_U = [Vr, proj_basis_r];
+    f2_S = blkdiag(S, -f1_proj_S_mtx);
+    f2_V = [Vz, proj_basis_z];
+
+    % QR factorize to ensure orthonormal in cylindrical coordinates
+    [f2_Vr, f2_S, f2_Vz, ~] = truncate(f2_U, f2_S, f2_V, rvals, tolerance);
+
+    % compute Pn(Te(f)) to ensure moments are kept
+    trun_f2_p = 2*pi*dr*dz*(sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz)'));
+    trun_f2_J = 2*pi*dr*dz*(sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz .* zvals)'));
+    trun_f2_k = pi*dr*dz*(sum(f2_Vr .* (rvals.^2) .* rvals)*f2_S*(sum(f2_Vz))' +  sum(f2_Vr .* rvals)*f2_S*(sum(f2_Vz .* (zvals.^2)))');
+    trun_f2_proj_S_mtx11 = (trun_f2_p / w_norm_1_squared) - (c*(2*trun_f2_k - c*trun_f2_p) / w_norm_v2_squared);
+    trun_f2_proj_S_mtx12 = (trun_f2_J / w_norm_v_squared);
+    trun_f2_proj_S_mtx13 = ((2*trun_f2_k - c*trun_f2_p) / w_norm_v2_squared);
+
+    trun_f2_proj_S_mtx   = [trun_f2_proj_S_mtx11, trun_f2_proj_S_mtx12, trun_f2_proj_S_mtx13;
+                    trun_f2_proj_S_mtx13,            0,            0];
+
+    % compute fM
+    fM_proj_S_mtx11 = (rhoM / w_norm_1_squared) - ((2*kappaM - c.*rhoM)*c / w_norm_v2_squared);
+    fM_proj_S_mtx12 = (JzM / w_norm_v_squared);
+    fM_proj_S_mtx13 = ((2*kappaM - c*rhoM) / w_norm_v2_squared);
+
+    fM_proj_S_mtx   = [fM_proj_S_mtx11, fM_proj_S_mtx12, fM_proj_S_mtx13;
+                       fM_proj_S_mtx13,               0,              0];
+
+    f_mass_S = fM_proj_S_mtx - trun_f2_proj_S_mtx;
+
+    [Vr, S, Vz, rank] = truncate([proj_basis_r, f2_Vr], blkdiag(f_mass_S, f2_S), [proj_basis_z, f2_Vz], rvals, 1e-14);
+
+end
+
+function [Vr, S, Vz, rank] = truncate(Vr_aug, S_aug, Vz_aug, rvals, tolerance)
+    [Qr, Rr] = qr2(Vr_aug, rvals); [Qz, Rz] = qr(Vz_aug, 0);
+    [U, Sigma, V] = svd(Rr*S_aug*Rz', 0); 
+    rank = find(diag(Sigma) > tolerance, 1, 'last');
+    Vr = Qr*U(:, 1:rank);
+    S = Sigma(1:rank, 1:rank);
+    Vz = Qz*V(:, 1:rank);
+end

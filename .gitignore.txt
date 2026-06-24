@@ -1,0 +1,6 @@
+*.fig
+*./Plots/
+*.png
+*jpg
+*.asv
+*.pdf
