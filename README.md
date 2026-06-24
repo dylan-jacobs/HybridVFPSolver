@@ -3,6 +3,7 @@ Solves the Vlasov Fokker-Planck equation in cylindrical coordinates using a hybr
 
 ## Heat Equation
 Everything for the heat equation test is located in the ./Heat-Equation/main_heat_equation.m MATLAB script. It can be set up to test either the solver's temporal accuracy or its mass conservation and rank-adaptivity. There are different parameters for each case, commented accordingly. To test the temporal accuracy, initialize the variable ```lambdavals``` to a vector (line 14) and ensure you are plotting the temporal accuracy graph in the "Figures" section of the script. 
+  
 ![Heat equation temporal accuracy plot](Heat-Equation/Plots/heat_eqn_temporal_error.pdf)
 
 ## 0D2V Lenard-Bernstein-Fokker-Planck (or Dougherty-Fokker-Planck) Equation
