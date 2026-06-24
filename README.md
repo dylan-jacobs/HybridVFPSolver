@@ -1,1 +1,8 @@
-# Vlasov-Fokker-Planck-Solver
+# Hybrid Vlasov-Fokker-Planck Solver
+Solves the Vlasov Fokker-Planck equation in cylindrical coordinates using a hybrid model; the ion distributions are described using a kinetic model, while the electrons are described using a fluid model. We test our solver on three problems: the heat equation, the 0D2V Lenard-Bernstein-Fokker-Planck equation, and the 1D2V Vlasov-Fokker-Planck equation.
+
+## Heat Equation
+Everything for the heat equation test is located in the ./Heat-Equation/main_heat_equation.m MATLAB script. It can be set up to test either the solver's temporal accuracy or its mass conservation and rank-adaptation. There are different parameters for each case, commented accordingly. To test the temporal accuracy, initialize the variable ```lambdavals``` to a vector (line 14) and ensure you are plotting the temporal accuracy graph in the "Figures" section of the script. 
+
+## Lenard-Bernstein-Fokker-Planck (or Dougherty-Fokker-Planck) Equation
+The Dougherty-Fokker-Planck (DFP) equation tests are located in the ./Dougherty-Fokker-Planck/main_DFP.m MATLAB script. The script can be set up to test either the solver's temporal accuracy or its other tests, such as mass conservation, L1 drive to equilibirum, relative entropy decay, and rank-adaptation. There are different parameters for each case, commented accordingly in the script. To test the temporal accuracy, initialize the variable ```lambdavals``` to a vector (line 14) and ensure you are plotting the temporal accuracy graph in the "Figures" section of the script. 
