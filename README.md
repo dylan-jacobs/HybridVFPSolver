@@ -23,3 +23,11 @@ The Dougherty-Fokker-Planck (DFP) equation tests are located in the ./Dougherty-
 ## 1D2V Vlasov-Fokker-Planck Equation
 ### Standing Shock Test
 The VFP Standing Shock tests are located in the ./Standing-Shock/main_VFP.m MATLAB script. The script can be set up to test either the solver's temporal accuracy or its other tests, such as mass, momentum, and energy conservation, and rank-adaptivity. There are different parameters for each case, commented accordingly in the script. To test the temporal accuracy, initialize the variable ```DTvals``` to a vector (line 7) and ensure you are plotting the temporal accuracy graph in the "Figures and Tables" section of the script. Because the temporal accuracy test also requires the reference solution (./Standing-Shock-Problem/VFP-Reference-Solution/vdfp_refsoln_IMEX222_QCM_Nx160_Nvperp200_Nvpar200_T1_tole-8_dt10-3.mat), it is necessary to ensure that the mesh parameters in the tested simulation match those of the reference solution. It is also necessary to uncomment lines 413-434 to calculate the temporal errors during the simulation. When running all other tests besides temporal accuracy, these lines (413-434) should be commented out because the reference solution mesh parameters may not match the simulated parameters and will cause errors. You can run and save your own reference solutions using line 138. The ```main_VFP.m``` script uses the quadrature-corrected-moments (QCM) procedure to slightly perturb the solution's numerical moments so that the moments generating the Maxwellian distribution exactly match that distribution's _numerical_ moments. Thus, it is important that the ```QCM.m``` script is located in the same directory as ```main_VFP.m```.
+
+### Example figures
+<p float="left">
+  <img width="30%"  src="https://github.com/user-attachments/assets/2a310992-3696-4608-ad55-6965f9feaa1a" />
+  <img width="30%" src="https://github.com/user-attachments/assets/7398481d-17bb-4a5a-b591-8be4bc3f280e" />
+  <img width="30%" src="https://github.com/user-attachments/assets/1f731666-6068-4885-974b-62cb0ae08d4b" />
+</p>
+
