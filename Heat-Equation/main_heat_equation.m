@@ -12,21 +12,21 @@ methods = ['1', '2', '3'];
 tolerance = 1e-6;
 
 lambdavals = (1:1:100)'; % for temporal accuracy test
-lambdavals = 1;        % for all other tests
+% lambdavals = 1;        % for all other tests
 errors = zeros(numel(lambdavals), 4);
 
 % mesh parameters
 rmin = 0; rmax = 1;
 zmin = 0; zmax = 1;
 Nr = 40; Nz = 80;  % temporal accuracy test
-Nr = 80; Nz = 160; % conservation, rank tests
+% Nr = 80; Nz = 160; % conservation, rank tests
 [Rmat, Zmat, dr, dz] = GetRZ(rmin, rmax, zmin, zmax, Nr, Nz);
 rvals = Rmat(:, 1);
 zvals = Zmat(1, :)';
 
 % final time
 tf = 1; % temporal accuracy test
-tf = 5; % conservation, rank tests
+% tf = 5; % conservation, rank tests
 
 % thermal conductivity coefficient
 alpha = 0.1;
@@ -35,7 +35,7 @@ Drr = gallery('tridiag', Nr, rvals(1:end-1)+(dr/2), -2*rvals, rvals(1:end-1)+(dr
 Drr(1, 1) = -(rvals(1) + (dr/2));
 Drr(end, end-1) = ((1/3) * (rvals(end) + (dr/2))) + (rvals(end) - (dr/2));
 Drr(end, end) =  ((-3) * (rvals(end) + (dr/2))) - (rvals(end) - (dr/2));
-Drr = alpha*((1/(dr^2)) * (diag(1./rvals) * Drr));
+Drr = alpha*((1/(dr^2)) * (spdiags(1./rvals, 0, Nr, Nr) * Drr));
 
 Dzz = alpha*((1/dz^2)*gallery('tridiag', Nz, 1, -2, 1)); % centered nodes
 
@@ -64,19 +64,14 @@ for k = 1:numel(lambdavals)
         f_exact = f_exact(Rmat, Zmat, tf);
         
         f = f0(Rmat, Zmat);
-
-        rhoM = sum(sum(f.*Rmat))*2*pi*dr*dz;
-        JzM  = sum(sum(f.*Rmat.*Zmat))*2*pi*dr*dz;
-        kappaM   = sum(sum(f.*Rmat.*((Rmat.^2 + Zmat.^2)/2)))*2*pi*dr*dz;
         
         % init bases
         [Vr, S, Vz] = svd2(f, rvals);
         r0 = min(r0, size(Vr, 2));
         Vr = Vr(:, 1:r0); S = S(1:r0, 1:r0); Vz = Vz(:, 1:r0);
                
-        mass(1, methodIndex) = 2*pi*dr*dz*sum(sum(Rmat .* f));
-        Jzvals(1, methodIndex) = 2*pi*dr*dz*sum(sum(f .* Rmat .* Zmat));
-        E(1, methodIndex) = 2*pi*dr*dz*sum(sum(f .* Rmat .* ((Rmat.^2 + Zmat.^2)/2)));
+        rhoM = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(Vz)');
+        mass(1, methodIndex) = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(Vz)');
         ranks(1, methodIndex) = r0;
         
         % time-stepping loop
@@ -92,13 +87,10 @@ for k = 1:numel(lambdavals)
                     [Vr, S, Vz, rank] = DIRK3Timestep(Vr, S, Vz, dt, rvals, zvals, Rmat, Zmat, Drr, Dzz, tolerance, rhoM);
             end
             
-            f = Vr*S*Vz';
-            mass(n, methodIndex) = 2*pi*dr*dz*sum(sum(Rmat .* f));    
-            Jzvals(n, methodIndex) = 2*pi*dr*dz*sum(sum(f .* Rmat .* Zmat));
-            E(n, methodIndex) = pi*dr*dz*sum(sum(f .* (Rmat.^2 + Zmat.^2) .* Rmat));
+            mass(n, methodIndex) = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(Vz)');
             ranks(n, methodIndex) = rank;
         end
-        
+        f = Vr*S*Vz';
         errors(k, methodIndex) = 2*pi*dr*dz*sum((sum(Rmat .* abs(f - f_exact)))); % L1 error
     end
 end
@@ -121,40 +113,40 @@ figure(2); clf; surf(Rmat, Zmat, f_exact);
 colorbar; shading interp;
 xlabel('V_r'); ylabel('V_z'); zlabel('f(V_r, V_z, t)'); title([sprintf('f_{exact} at time t=%s', num2str(tf, 4))]);
 
-% % 3. Temporal error plot
-% c_blue   = [0.1216 0.4667 0.7059];
-% c_orange = [1.0000 0.4980 0.0549];
-% c_green  = [0.1725 0.6275 0.1725];
-% c_red    = [0.8392 0.1529 0.1569];
-% c_purple = [0.5804 0.4039 0.7412];
-% c_brown  = [0.5490 0.3373 0.2941];
-% c_pink   = [0.8902 0.4667 0.7608];
-% c_gray   = [0.4980 0.4980 0.4980];
-% c_black  = [0.0000 0.0000 0.0000];
-% 
-% dtvals = lambdavals./((1/dr) + (1/dz));
-% figure(3); clf; 
-% begin_cutoff_1 = ceil(0.1*numel(dtvals)); end_cutoff_1 = ceil(0.4*numel(dtvals));
-% begin_cutoff_2 = ceil(0.25*numel(dtvals)); end_cutoff_2 = ceil(0.7*numel(dtvals));
-% begin_cutoff_3 = ceil(0.45*numel(dtvals)); end_cutoff_3 = ceil(0.95*numel(dtvals));
-% % begin_cutoff_4 = ceil(0.45*numel(dtvals)); end_cutoff_4 = ceil(1*numel(dtvals));
-% 
-% loglog(dtvals, errors(:, 1, 1), 'Color', c_blue,  'LineWidth', 1.5); hold on; % B. Euler
-% loglog(dtvals, errors(:, 2, 1), 'Color', c_orange,  'LineWidth', 1.5); % DIRK2
-% loglog(dtvals, errors(:, 3, 1), 'Color', c_green,  'LineWidth', 1.5); % DIRK3
-% % loglog(dtvals, errors(:, 4, 1), 'Color', c_black,  'LineWidth', 1.5); % DIRK4
-% 
-% loglog(dtvals(begin_cutoff_1:end_cutoff_1), 0.1*dtvals(begin_cutoff_1:end_cutoff_1), '--', 'Color', c_blue, 'LineWidth', 1); % Order 1
-% loglog(dtvals(begin_cutoff_2:end_cutoff_2), 0.045*dtvals(begin_cutoff_2:end_cutoff_2).^2, '--', 'Color', c_orange, 'LineWidth', 1); % Order 2
-% loglog(dtvals(begin_cutoff_3:end_cutoff_3), 0.02*dtvals(begin_cutoff_3:end_cutoff_3).^3, '--', 'Color', c_green, 'LineWidth', 1); % Order 3
-% % loglog(dtvals(begin_cutoff_4:end_cutoff_4), 0.035*dtvals(begin_cutoff_4:end_cutoff_4).^4, '--', 'Color', c_black, 'LineWidth', 1); % Order 4
-% xlabel('\Deltat'); ylabel('L^1 Error');
-% legend('Backward Euler', 'DIRK2', 'DIRK3', 'Order 1', 'Order 2', 'Order 3', 'location','northwest');
-% ylim([9e-5, 7e-1]);
-% fontsize(18,"points");
-% set(gcf,'Units','pixels','Position',[100 100 800 500])
-% saveas(gcf, './Plots/heat_eqn_temporal_error_single_spatial.fig');
-% exportgraphics(gcf,'./Plots/heat_eqn_temporal_error.pdf','ContentType','vector');
+% 3. Temporal error plot
+c_blue   = [0.1216 0.4667 0.7059];
+c_orange = [1.0000 0.4980 0.0549];
+c_green  = [0.1725 0.6275 0.1725];
+c_red    = [0.8392 0.1529 0.1569];
+c_purple = [0.5804 0.4039 0.7412];
+c_brown  = [0.5490 0.3373 0.2941];
+c_pink   = [0.8902 0.4667 0.7608];
+c_gray   = [0.4980 0.4980 0.4980];
+c_black  = [0.0000 0.0000 0.0000];
+
+dtvals = lambdavals./((1/dr) + (1/dz));
+figure(3); clf; 
+begin_cutoff_1 = ceil(0.1*numel(dtvals)); end_cutoff_1 = ceil(0.4*numel(dtvals));
+begin_cutoff_2 = ceil(0.25*numel(dtvals)); end_cutoff_2 = ceil(0.7*numel(dtvals));
+begin_cutoff_3 = ceil(0.45*numel(dtvals)); end_cutoff_3 = ceil(0.95*numel(dtvals));
+% begin_cutoff_4 = ceil(0.45*numel(dtvals)); end_cutoff_4 = ceil(1*numel(dtvals));
+
+loglog(dtvals, errors(:, 1, 1), 'Color', c_blue,  'LineWidth', 1.5); hold on; % B. Euler
+loglog(dtvals, errors(:, 2, 1), 'Color', c_orange,  'LineWidth', 1.5); % DIRK2
+loglog(dtvals, errors(:, 3, 1), 'Color', c_green,  'LineWidth', 1.5); % DIRK3
+% loglog(dtvals, errors(:, 4, 1), 'Color', c_black,  'LineWidth', 1.5); % DIRK4
+
+loglog(dtvals(begin_cutoff_1:end_cutoff_1), 0.1*dtvals(begin_cutoff_1:end_cutoff_1), '--', 'Color', c_blue, 'LineWidth', 1); % Order 1
+loglog(dtvals(begin_cutoff_2:end_cutoff_2), 0.045*dtvals(begin_cutoff_2:end_cutoff_2).^2, '--', 'Color', c_orange, 'LineWidth', 1); % Order 2
+loglog(dtvals(begin_cutoff_3:end_cutoff_3), 0.02*dtvals(begin_cutoff_3:end_cutoff_3).^3, '--', 'Color', c_green, 'LineWidth', 1); % Order 3
+% loglog(dtvals(begin_cutoff_4:end_cutoff_4), 0.035*dtvals(begin_cutoff_4:end_cutoff_4).^4, '--', 'Color', c_black, 'LineWidth', 1); % Order 4
+xlabel('\Deltat'); ylabel('L^1 Error');
+legend('Backward Euler', 'DIRK2', 'DIRK3', 'Order 1', 'Order 2', 'Order 3', 'location','northwest');
+ylim([9e-5, 7e-1]);
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position',[100 100 800 500])
+saveas(gcf, './Plots/heat_eqn_temporal_error_single_spatial.fig');
+exportgraphics(gcf,'./Plots/heat_eqn_temporal_error.pdf','ContentType','vector');
 
 % 4. Mass conservation
 figure(4); clf; 

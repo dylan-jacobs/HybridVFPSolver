@@ -1,7 +1,7 @@
 clc; clear variables; close all;
 
 lambdavals = (0.2:0.1:6)'; % for accuracy plots
-% lambdavals = 1; % for non accuracy plots
+lambdavals = 1; % for non accuracy plots
 % lambdavals = [0.01]; % for reference soln
 
 soln = load('./DFP-Reference-Solution/dfp_refsoln_dirk3.mat');
@@ -14,8 +14,8 @@ tolerance = 1e-6;
 vmin = 0; vmax = 14;
 zmin = -16; zmax = 16;
 Nr = 100; Nz = 100;
-tf = 1; % for temporal accuracy plot
-% tf = 25; % for non accuracy plots
+% tf = 1; % for temporal accuracy plot
+tf = 25; % for non accuracy plots
 
 [Rmat, Zmat, dr, dz] = GetRZ(vmin, vmax, zmin, zmax, Nr, Nz);
 rvals = Rmat(:, 1);
@@ -26,7 +26,6 @@ r0 = 10;
 
 % initial conditions
 f_M = @(vr,vz,n,ur,uz,T,R) (n/(2*pi*R*T)^(3/2)).*exp(-(vr.^2+(vz-uz).^2)./(2*R*T)); %assumes ur=0!!!
-
 
 n1 = 2;
 u1r = 0;
@@ -60,11 +59,16 @@ for k = 1:numel(lambdavals)
         
         f0 = @(vr,vz) f_M(vr,vz,n1,u1r,u1z,T1,R) + f_M(vr,vz,n2,u2r,u2z,T2,R); % IC
         f = f0(Rmat, Zmat);
+
+        % init bases
+        [Vr, S, Vz] = svd2(f, rvals);
+        r0 = min(r0, size(Vr, 2)); % initial rank r0
+        Vr = Vr(:, 1:r0); S = S(1:r0, 1:r0); Vz = Vz(:, 1:r0);
         
         % discrete moments of f0
-        rho0 = sum(sum(f.*Rmat))*2*pi*dr*dz;
-        Jz0  = sum(sum(f.*Rmat.*Zmat))*2*pi*dr*dz;
-        kappa0   = sum(sum(f.*Rmat.*((Rmat.^2 + Zmat.^2)/2)))*2*pi*dr*dz;
+        rho0 = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(Vz)');
+        Jz0  = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(zvals .* Vz)');
+        kappa0 = pi*dr*dz*(sum(Vr.*(rvals.^2).*rvals)*S*(sum(Vz)') + sum(Vr.*rvals)*S*(sum(Vz.*(zvals.^2)))');
         
         [f_inf, n_inf, uz_inf, T_inf] = QCM(rho0, Jz0, kappa0, R, rvals, zvals);
         
@@ -92,12 +96,7 @@ for k = 1:numel(lambdavals)
         w_norm_1_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(wz);
         w_norm_v_squared = 2*pi*dr*dz*sum(rvals .* wr)*sum(zvals.^2 .* wz);
         w_norm_v2_squared = 2*pi*dr*dz*sum(sum((Rmat.^2 + Zmat.^2 - c).^2 .* exp(-Rmat.^2 - Zmat.^2) .* Rmat));
-        
-        % init bases
-        [Vr, S, Vz] = svd2(f, rvals);
-        r0 = min(r0, size(Vr, 2)); % initial rank r0
-        Vr = Vr(:, 1:r0); S = S(1:r0, 1:r0); Vz = Vz(:, 1:r0);
-        
+               
         l1(1, x) = 2*pi*dr*dz*sum(sum(abs(Rmat .* (f - f_inf))));
         mass(1) = rho0;
         Jzvals(1) = Jz0;
@@ -122,9 +121,9 @@ for k = 1:numel(lambdavals)
             f = Vr*S*Vz';
             
             l1(n, x) = 2*pi*dr*dz*sum(sum(abs(Rmat .* (f - f_inf))));
-            mass(n) = 2*pi*dr*dz*sum(sum(Rmat .* f));    
-            Jzvals(n) = 2*pi*dr*dz*sum(sum(f .* Rmat .* Zmat));
-            E(n) = pi*dr*dz*sum(sum(f .* (Rmat.^2 + Zmat.^2) .* Rmat));
+            mass(n) = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(Vz)');
+            Jzvals(n)  = 2*pi*dr*dz*sum(rvals .* Vr)*S*(sum(zvals .* Vz)');
+            E(n) = pi*dr*dz*(sum(Vr.*(rvals.^2).*rvals)*S*(sum(Vz)') + sum(Vr.*rvals)*S*(sum(Vz.*(zvals.^2)))');
             relative_entropy(n, x) = 2*pi*dr*dz*sum(sum(Rmat .* f.*(log((f+1e-16)./(f_inf+1e-16)))));
             ranks(n, x) = rank;
         end
@@ -265,7 +264,7 @@ function [Flux] = GetFlux(A, B, C, u, xvals, t, dx)
     F_pos = spdiags([F1;0], 0, N, N) + spdiags([0;F2], 1, N, N);
     F_neg = spdiags([0; F2], 0, N, N) + spdiags(F1, -1, N, N);
 
-    Flux = diag(1./A)*(1/dx)*(F_pos - F_neg);
+    Flux = spdiags(1./A, 0, N, N)*(1/dx)*(F_pos - F_neg);
 end
 
 function [Vr, S, Vz, rank] = BackwardEulerTimestep(Vr0, S0, Vz0, ur, uz, dt, tval, rvals, zvals, Ar, Az, Br, Bz, Cr, Cz, tolerance, rhoM, JzM, kappaM, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)

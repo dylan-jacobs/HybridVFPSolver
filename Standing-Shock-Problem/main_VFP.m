@@ -50,6 +50,7 @@ for dt_index = 1:numel(DTvals)
     momentum = zeros(Nt, 1);
     energy = zeros(Nt, 1);
     avg_ranks = zeros(Nt, numel(methods));
+    max_ranks = zeros(Nt, numel(methods));
     Efield = zeros(Nt, numel(methods));
 
 
@@ -122,6 +123,7 @@ for dt_index = 1:numel(DTvals)
         momentum(1) = dx*ma*sum(n_vals .* u_para);
         energy(1) = dx*ma*sum(0.5*((3/ma)*n_vals.*Ta_vals + n_vals.*u_para.^2) + (3/2)*n_vals.*Te_vals);
         avg_ranks(1, method_index) = mean(spatial_rank_vals);
+        max_ranks(1, method_index) = max(spatial_rank_vals);
         Efield(1, method_index) = sqrt(dx*sum(abs(spatial_Efield) .^ 2));
         
         flux_diff_n = 0;
@@ -391,6 +393,7 @@ for dt_index = 1:numel(DTvals)
             % update f_vals simultaneously
             f_vals_low_rank = f_vals_low_rank_temp;
             avg_ranks(t_index, method_index) = mean(spatial_rank_vals);
+            max_ranks(t_index, method_index) = max(spatial_rank_vals);
             Efield(t_index, method_index) = sqrt(dx*sum(abs(spatial_Efield) .^ 2));
                                         
             mass(t_index) = dx*ma*sum(n_vals_diff) + flux_diff_n;
@@ -475,8 +478,8 @@ legend('n', 'u_{||}', 'T_e', 'T_a', 'Location', 'east');
 xlabel('x'); ylabel('Magnitude'); % title(sprintf('Mass, momentum, ion temperature, and electron temperature at t=%s', num2str(tval)));
 fontsize(18,"points");
 set(gcf,'Units','pixels','Position', [100 100 800 500]);
-% saveas(gcf, './Plots/VFP_macro_moments_tf_100.fig');
-% exportgraphics(gcf,'./Plots/VFP_macro_moments_tf_100.pdf','ContentType','vector')
+% saveas(gcf, './Plots/VFP_macro_moments_tf_5000_step_IC.fig');
+% exportgraphics(gcf,'./Plots/VFP_macro_moments_tf_5000_step_IC.pdf','ContentType','vector')
 
 %% Structure conservation
 figure(3); clf; 
@@ -490,17 +493,39 @@ set(gcf,'Units','pixels','Position', [100 100 800 500]);
 % saveas(gcf, './Plots/VFP_structure_conservation.fig');
 % exportgraphics(gcf,'./Plots/VFP_structure_conservation.pdf','ContentType','vector');
 
-
-% Rank plot
+%%
+% Average rank
 figure(4); clf;
 plot(tvals, avg_ranks, 'k', 'LineWidth', 1.5); hold on;
-xlabel('time'); ylabel('Average rank'); % title('Average rank plot');
+xlabel('time'); ylabel('Average rank'); 
 ylim([0, 10]);
 legend('IMEX222');
 fontsize(18,"points");
 set(gcf,'Units','pixels','Position', [100 100 800 500]);
 % saveas(gcf, './Plots/VFP_rank_plot.fig');
 % exportgraphics(gcf,'./Plots/VFP_rank_plot.pdf','ContentType','vector')
+
+% Max rank
+figure(5); clf;
+plot(tvals, max_ranks, 'k', 'LineWidth', 1.5); hold on;
+xlabel('time'); ylabel('Maximum rank'); 
+ylim([0, 10]);
+legend('IMEX222', 'location', 'best');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/VFP_max_rank_plot.fig');
+% exportgraphics(gcf,'./Plots/VFP_max_rank_plot.pdf','ContentType','vector')
+
+% Spatial rank
+figure(6); clf;
+plot(xvals, spatial_rank_vals, 'k', 'LineWidth', 1.5); hold on;
+xlabel('x'); ylabel('Rank'); 
+ylim([0, 10]);
+legend('IMEX222');
+fontsize(18,"points");
+set(gcf,'Units','pixels','Position', [100 100 800 500]);
+% saveas(gcf, './Plots/VFP_spatial_rank_plot.fig');
+% exportgraphics(gcf,'./Plots/VFP_spatial_rank_plot.pdf','ContentType','vector')
 
 
 % Numerical solution
@@ -624,7 +649,7 @@ function [Flux] = GetFokkerPlanckFlux(A, B, C, u, T, m, xvals, t, dx)
     F_pos = spdiags([F1;0], 0, N, N) + spdiags([0;F2], 1, N, N);
     F_neg = spdiags([0; F2], 0, N, N) + spdiags(F1, -1, N, N);
 
-    Flux = diag(1./A)*(1/dx)*(F_pos - F_neg);
+    Flux = spdiags(1./A, 0, N, N)*(1/dx)*(F_pos - F_neg);
 end
 
 function [Vr, S, Vz, rank, E] = IMEX111(Vr0, S0, Vz0, ur, uz, dt, dx, tval, rvals, zvals, x_min, x_max, f_vals_low_rank, ma, me, qa, qe, Ar, Az, Br, Bz, Cr, Cz, tolerance, n_vals, Ta_vals, Te_vals, rhoM, JzM, kappaM, spatialIndex, R_const, leftBC, rightBC, wr, wz, c, w_norm_1_squared, w_norm_v_squared, w_norm_v2_squared)
@@ -1057,11 +1082,20 @@ function [f_vals_low_rank] = maxwellian_low_rank(n, v_perp, v_para, u_para, T, R
     end
 end
 
+% Smoothed IC (for accuracy test)
+% function [n0, u_para0, T_ae0] = get_boundaries(x_min, x_max)
+%     x_mid = x_min + (x_max - x_min)/2;
+%     n0 = @(x) 0.36*tanh(0.05*(x-x_mid)) + 0.64;
+%     u_para0 = @(x) -1.1154*tanh(0.05*(x-x_mid)) + 1.983;
+%     T_ae0 = @(x) 0.4424*tanh(0.05*(x-x_mid)) + 0.5576; % Ta = Te at boundary!
+% end
+
+% Discontinuous IC (for other tests)
 function [n0, u_para0, T_ae0] = get_boundaries(x_min, x_max)
     x_mid = x_min + (x_max - x_min)/2;
-    n0 = @(x) 0.36*tanh(0.05*(x-x_mid)) + 0.64;
-    u_para0 = @(x) -1.1154*tanh(0.05*(x-x_mid)) + 1.983;
-    T_ae0 = @(x) 0.4424*tanh(0.05*(x-x_mid)) + 0.5576; % Ta = Te at boundary!
+    n0 = @(x) 0.28*(x < x_mid) + (x >= x_mid);
+    u_para0 = @(x) 3.0984*(x < x_mid) + 0.8676*(x >= x_mid);
+    T_ae0 = @(x) 0.1152*(x < x_mid) + (x >= x_mid);
 end
 
 
